@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
+from . import fuzzy
 from .constants import APP_DIR
 from .netrules import RULES
 from .downloads import ARCHIVE_URL, describe_error, http_open, LinkError, parse_archive_url, RemoteFile
@@ -114,8 +115,8 @@ def search_name(game: str) -> str:
 
 
 def _words(text: str) -> list[str]:
-    core, _ = title_core(text)
-    return [w for w in core.split() if w not in NOISE_WORDS]
+    core, _ = title_core(fuzzy.strip_accents(text))
+    return [w for w in fuzzy.merge_letters(core.split()) if w not in NOISE_WORDS]
 
 
 def _contains_run(big: list[str], small: list[str]) -> bool:
@@ -1533,6 +1534,17 @@ def find_albums(requests: list[GameRequest], providers=DEFAULT_PROVIDERS,
                         res.albums += p.search(query)
                     except LinkError as exc:
                         problems.append(f"{p.name}: {exc}")
+                if not any(a.score > 0 for a in res.albums) and not problems:  # nothing: try other spellings
+                    for variant in fuzzy.query_variants(query, fuzzy.HISTORY.titles()):
+                        for p in providers:
+                            try:
+                                res.albums += p.search(variant)
+                            except LinkError as exc:
+                                problems.append(f"{p.name}: {exc}")
+                        if any(a.score > 0 for a in res.albums):
+                            break
+                if res.albums:  # real titles are kept for suggestions
+                    fuzzy.HISTORY.add_many([fuzzy.clean_title(a.title) for a in res.albums[:3] if a.score > 0])
                 res.albums.sort(key=lambda a: a.score, reverse=True)
                 res.albums = [a for a in res.albums if a.score > 0]
                 res.albums = _rank_playable(res.albums, providers)

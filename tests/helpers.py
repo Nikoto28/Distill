@@ -24,11 +24,15 @@ class IsolatedSoundtrackFiles(unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         from unittest import mock
-        from distill import mediastore, soundtracks
+        from distill import fuzzy, mediastore, soundtracks
 
         td = tempfile.TemporaryDirectory(prefix="distill_app_")
         self.addCleanup(td.cleanup)
         root = Path(td.name)
+        hist = mock.patch.object(fuzzy.HISTORY, "_path", root / "history.json")
+        hist.start()
+        self.addCleanup(hist.stop)
+        fuzzy.HISTORY._items = None
         media = mock.patch.object(mediastore, "DB_FILE", root / "media.db")  # the Media page's own database
         media.start()
         self.addCleanup(media.stop)
@@ -285,3 +289,10 @@ def logs(events) -> str:
 
 WINDOWS_ONLY = unittest.skipUnless(sys.platform == "win32", "Windows only")
 POSIX_ONLY = unittest.skipIf(sys.platform == "win32", "needs a POSIX shell script / shebang")
+
+
+def enter(case, cm):
+    """TestCase.enterContext needs Python 3.11; this works on 3.10 too."""
+    value = cm.__enter__()
+    case.addCleanup(cm.__exit__, None, None, None)
+    return value

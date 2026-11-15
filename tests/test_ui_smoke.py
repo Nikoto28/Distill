@@ -16,6 +16,7 @@ if sys.platform != "win32":  # Windows' offscreen plugin has no fonts and can cr
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from distill import soundtracks as st
 from tests.helpers import IsolatedSoundtrackFiles
+from tests.helpers import enter
 from tests import helpers  # noqa: E402,F401
 
 
@@ -2400,7 +2401,7 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         with win._gm_store._db() as db:  # Zelda was found long ago
             db.execute("UPDATE games SET added = 1 WHERE title = 'Zelda'")
         win._gm_store.add_playtime(win._gm_store.games(query="Mario")[0].id, 3600)
-        self.enterContext(mock.patch.object(gm, "fetch_cover", lambda g, key="", retry=False: None))
+        enter(self, mock.patch.object(gm, "fetch_cover", lambda g, key="", retry=False: None))
         win._gm_reload()
 
         win.gm_pills["new"].click()  # Recently added: not Zelda
@@ -2455,9 +2456,9 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         dest = root / "dl" / "snes" / "Zelda.sfc"
         win._gm_store.sync_remote([romm.RemoteEntry("7", "Zelda", "SNES", str(dest), "SFC", size=3, remote_name="Zelda.sfc")], "romm:h")
         started = []
-        self.enterContext(mock.patch.object(gm, "fetch_cover", lambda g, key="", retry=False: None))
-        self.enterContext(mock.patch.object(gm, "spawn", lambda plan: started.append(plan)))
-        self.enterContext(mock.patch.object(type(win), "_gm_retro", lambda self: setup))
+        enter(self, mock.patch.object(gm, "fetch_cover", lambda g, key="", retry=False: None))
+        enter(self, mock.patch.object(gm, "spawn", lambda plan: started.append(plan)))
+        enter(self, mock.patch.object(type(win), "_gm_retro", lambda self: setup))
         win._gm_reload()
         gid = win.gm_list.item(0).data(ID_ROLE)
         g = win.gm_store.get(gid)

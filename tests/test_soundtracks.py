@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests import helpers  # noqa: F401  (puts the project on sys.path)
-from tests.helpers import IsolatedSoundtrackFiles, TempDirTest
+from tests.helpers import IsolatedSoundtrackFiles, TempDirTest, enter
 
 from distill import soundtracks as st
 from distill.downloads import LinkError, RemoteFile
@@ -544,7 +544,7 @@ class KHInsiderTests(unittest.TestCase):
         self.assertIsNone(st.snapshot_for_quality([], "mp3"))
 
     def test_khinsider_pages_are_asked_for_like_a_browser_and_other_sites_are_left_alone(self):
-        self.enterContext(mock.patch.object(st, "_cffi_session", lambda: None))  # the plain urllib path
+        enter(self, mock.patch.object(st, "_cffi_session", lambda: None))  # the plain urllib path
         h = st.khinsider_headers("https://downloads.khinsider.com/search?search=x")
         self.assertTrue(h["User-Agent"].startswith("Mozilla/5.0"))
         self.assertIn("Accept-Language", h)
@@ -562,7 +562,7 @@ class KHInsiderTests(unittest.TestCase):
         self.assertIn("User-Agent", seen)
 
     def test_a_cloudflare_challenge_is_recognised_and_khinsider_is_then_left_alone_for_a_while(self):
-        self.enterContext(mock.patch.object(st, "_cffi_session", lambda: None))  # the plain urllib path
+        enter(self, mock.patch.object(st, "_cffi_session", lambda: None))  # the plain urllib path
         import io
         import urllib.error
 
@@ -594,7 +594,7 @@ class KHInsiderTests(unittest.TestCase):
         self.assertFalse(st.is_challenge({}, b"just a moment, said the cashier"))  # no Cloudflare in it
 
     def test_an_ordinary_403_from_khinsider_is_reported_as_a_refusal(self):
-        self.enterContext(mock.patch.object(st, "_cffi_session", lambda: None))  # the plain urllib path
+        enter(self, mock.patch.object(st, "_cffi_session", lambda: None))  # the plain urllib path
         import io
         import urllib.error
 
