@@ -11,13 +11,15 @@ from pathlib import Path
 from PySide6.QtCore import QRegularExpression, Qt, QTimer
 from PySide6.QtGui import QPixmap, QRegularExpressionValidator
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .. import paths
 from ..iconfinder import find_icon, IconHit, IconLookupError, sgdb_key
 from ..models import fmt_size
 from ..switchconv import clean_name, find_image, TitleEdit, TitleEntry
+from . import msgbox
+from .frameless import FramelessDialog
 from .theme import T
 
 IMAGE_FILTER = "Pictures (*.png *.jpg *.jpeg *.dat);;All files (*)"
@@ -25,20 +27,17 @@ ICON_SIDE = 240
 ICON_CACHE = paths.cache_dir() / "icon_cache"  # pictures found online are kept here, so a run can use them later
 
 
-class TitleDialog(QDialog):
+class TitleDialog(FramelessDialog):
     def __init__(self, entry: TitleEntry, edit: TitleEdit | None, art_dir: str = "", existing_nup: bool = False,
                  parent: QWidget | None = None):
         """`existing_nup`: the title is a .nup that is being edited, where only the icon, publisher and version can change."""
-        super().__init__(parent)
+        super().__init__(parent, "Properties", "settings", None, (440, 0))
         self.entry, self._art_dir, self._icon = entry, art_dir, (edit.icon if edit else "")
         self._search: dict | None = None  # the online lookup while it runs: {"cancel": Event, "result": ...}
         self._poll = QTimer(self)
         self._poll.setInterval(150)
         self._poll.timeout.connect(self._poll_search)
-        self.setWindowTitle("Properties")
-        self.setMinimumWidth(400)
-        outer = QVBoxLayout(self)
-        outer.setSpacing(10)
+        outer = self.body()
 
         box = QGroupBox("Info")
         lay = QVBoxLayout(box)
@@ -229,7 +228,7 @@ class TitleDialog(QDialog):
     def accept(self) -> None:
         text = self.title_id.text().strip()
         if text and len(text) != 16:
-            QMessageBox.warning(self, "Title ID", "A title ID is 16 hex digits (for example 0100633007D48000). "
+            msgbox.warning(self, "Title ID", "A title ID is 16 hex digits (for example 0100633007D48000). "
                                                   "Complete it, or clear the box to use the game's own.")
             return
         super().accept()

@@ -3,11 +3,11 @@ log's search and save, the Ctrl+K page jumper and tooltips that say why a contro
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QSystemTrayIcon, QToolTip
-from PySide6.QtGui import QCursor
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QSystemTrayIcon
 
 from ..constants import APP_NAME
 from ..models import fmt_duration
+from ..runview import DL, view_of
 from .nav import NAV_GROUPS, PAGE_INFO
 from .palette import GoToDialog
 
@@ -23,12 +23,12 @@ class FeedbackMixin:
         self.banner.show_message(text, level, ms, action)
 
     # ---- title bar progress ----------------------------------------------------------------
-    def _title_progress(self, percent: int | None) -> None:
+    def _title_progress(self, percent: int | None, paused: bool | None = None) -> None:
         base = getattr(self, "_base_title", "") or self.windowTitle()
         if percent is None:
             self.setWindowTitle(base)
         else:
-            tag = "Paused" if self.is_paused else f"{percent}%"
+            tag = "Paused" if (self.is_paused if paused is None else paused) else f"{percent}%"
             self.setWindowTitle(f"{tag} - {base}")
 
     # ---- finished-run notification -----------------------------------------------------------
@@ -49,9 +49,15 @@ class FeedbackMixin:
         tray.showMessage(title, text, QSystemTrayIcon.MessageIcon.Information, 8000)
         QTimer.singleShot(12000, tray.hide)  # the tray icon exists only for the toast
 
-    def _notify_run_done(self, secs: float) -> None:
-        self._notify_finished(f"{APP_NAME}: run finished", f"{self.lbl_total_prog.text()}  -  took {fmt_duration(secs)}",
+    def _notify_run_done(self, secs: float, text: str | None = None) -> None:
+        self._notify_finished(f"{APP_NAME}: run finished", f"{text or self.lbl_total_prog.text()}  -  took {fmt_duration(secs)}",
                               secs)
+
+    def _aura_state(self) -> tuple[bool, bool]:
+        """(running, paused) for the Start button's glow: the run of the page on screen, or an Organise job."""
+        dl = view_of(self._current_mode()) == DL
+        own, paused = (self.dl_runner is not None, self.dl_paused) if dl else (self.is_processing, self.is_paused)
+        return bool(own or self.org_busy), bool(paused and own)
 
     # ---- the log ---------------------------------------------------------------------------
     def _log_save(self) -> None:
@@ -89,9 +95,6 @@ class FeedbackMixin:
         return out
 
     def _open_goto(self) -> None:
-        if self.is_processing:
-            QToolTip.showText(QCursor.pos(), "Locked while a run is active. Stop it or wait for it to finish.", self)
-            return
         dlg = GoToDialog(self._goto_entries(), self)
         if dlg.exec() == QDialog.DialogCode.Accepted and (key := dlg.chosen()):
             self._open_settings() if key == "__settings__" else self._nav_click(key)
@@ -105,14 +108,14 @@ class FeedbackMixin:
         self._aura_timer.start()
 
     def _aura_sync(self) -> None:
+        self._runbar_sync()  # a safety net: the bar along the bottom always matches whether a job is running and where
         button = getattr(self, "start_btn", None)
         if button is None or not hasattr(button, "set_state"):
             return
-        running = bool(self.is_processing or self.org_busy)
-        paused = bool(self.is_paused and self.is_processing)
-        if (running, paused) != getattr(self, "_aura_last", None):
-            self._aura_last = (running, paused)
-            button.set_state(running, paused)
+        state = self._aura_state()
+        if state != getattr(self, "_aura_last", None):
+            self._aura_last = state
+            button.set_state(*state)
 
     def _why_setup(self) -> None:
         self._why_items: list[tuple[object, str, str]] = []

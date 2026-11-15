@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 
 from .. import libretro_cores as lc
 from .. import recomps as rc
-from . import icons
+from . import icons, msgbox
 from .emu_cards import break_path, pill_css, section_header
 from .theme import T
 from .widgets import accent_button, Card, fit_columns, hint
@@ -82,7 +82,7 @@ class CoresMixin:
         self.emd_cores_tree.setColumnWidth(1, 170)
         self.emd_cores_tree.setColumnWidth(2, 130)
         self.emd_cores_tree.setColumnWidth(3, 64)
-        fit_columns(self.emd_cores_tree, flex=0)  # every column drags (Qt can't drag a stretching one); Core takes the slack until you do
+        fit_columns(self.emd_cores_tree, flex=0, flex_min=280)  # every column drags (Qt can't drag a stretching one); Core takes the slack until you do, and is always wide enough to read
         self.emd_cores_tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self.emd_cores_tree.itemChanged.connect(self._cores_item_changed)
         self.emd_cores_tree.currentItemChanged.connect(lambda cur, _prev: self._cores_describe(cur))
@@ -360,7 +360,7 @@ class CoresMixin:
         if drop:
             names = ", ".join(c.display for c in drop[:4]) + (f" and {len(drop) - 4} more" if len(drop) > 4 else "")
             ask = f"Delete {len(drop)} core{'s' if len(drop) != 1 else ''} from RetroArch's cores folder?\n\n{names}"
-            if QMessageBox.question(self, "Remove cores", ask) != QMessageBox.StandardButton.Yes:
+            if msgbox.question(self, "Remove cores", ask) != QMessageBox.StandardButton.Yes:
                 return
         self._cores_run(add, drop)
 

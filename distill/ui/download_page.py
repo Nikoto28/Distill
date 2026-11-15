@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QModelIndex, Qt, QTimer, QUrl
+from PySide6.QtCore import QModelIndex, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog,
@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from .. import magnet, paths
+from .. import afteractions, magnet, paths
 from ..clipwatch import links_in_text
 from ..folderwatch import FolderWatcher, WATCH_FOLDER
 from ..dlfiles import (
@@ -28,7 +28,9 @@ from ..dlfiles import (
 from ..downloads import DL_MAX_PARALLEL, DownloadRunner, DownloadSummary, logins_missing, RemoteFile, SESSION_FILE
 from ..links import probe_sizes, resolve_links
 from ..models import fmt_duration, fmt_size
+from . import motion, msgbox
 from .models import FINISHED
+from .power_countdown import PowerCountdown
 from .theme import T
 from ..torbox import torbox_key
 from .. import debrid
@@ -110,6 +112,7 @@ class DownloadMixin:
         # -- right: where it goes, and what happens when it is done
         self.dl_dest = PathRow("Save to", label_width=LABEL_W)
         self.dl_dest.edit.setAcceptDrops(False)
+        self.dl_dest.edit.setPlaceholderText(f"{self._dl_default_dir()}  (your Downloads folder)")  # what an empty box means
         self.dl_dest.edit.textChanged.connect(lambda *_: self._dl_save_soon())
         self.dl_post = QComboBox()
         self.dl_post.addItems(["Nothing more", "Unpack archives", "Unpack archives, then delete them"])
@@ -117,9 +120,28 @@ class DownloadMixin:
                                 "7z and rar need 7-Zip installed.")
         self.dl_post.currentIndexChanged.connect(lambda *_: self._dl_save_soon())
         self.dl_organize = AnimCheckBox("Then open Sort by System")
-        self.dl_organize.setToolTip("When everything finished without errors, open the Organize page on the "
+        self.dl_organize.setToolTip("When everything finished without errors, open the Organise page on the "
                                     "download folder so you can scan and sort it.")
         self.dl_organize.toggled.connect(lambda *_: self._dl_save_soon())
+        self.dl_command = QLineEdit()
+        self.dl_command.setPlaceholderText('"C:\\Tools\\sync.bat" {folder}')
+        self.dl_command.setToolTip(
+            "A program to run when the downloads are done (not when you stopped them). Put a path with spaces in \"quotes\". "
+            "{folder} = the download folder, {list} = a text file listing the finished files, {count} = how many "
+            "finished, {failed} = how many failed. It runs in the download folder, and the Computer step below waits for it "
+            "and is skipped if it fails.")
+        self.dl_power = QComboBox()
+        self.dl_power.addItems(afteractions.POWER_LABELS)
+        self.dl_power.setToolTip(
+            "Put this computer to sleep, hibernate it or shut it down when the downloads end. You get 60 seconds to "
+            "cancel. It does nothing if you stopped the downloads yourself, and it is switched off again each time "
+            "Distill starts, so it can never surprise you later.")
+        self._dl_cmd_proc = None
+        self._dl_cmd_power = ""
+        self._dl_cmd_ticks = 0
+        self._dl_cmd_timer = QTimer(self)
+        self._dl_cmd_timer.setInterval(1000)
+        self._dl_cmd_timer.timeout.connect(self._dl_cmd_poll)
         self.dl_autoresume = AnimCheckBox("Resume on startup")
         self.dl_autoresume.setToolTip("If Distill is closed (or crashes) mid-download, carry on automatically next time it "
                                       "starts. Finished files are skipped and partial ones resume.")
@@ -131,6 +153,8 @@ class DownloadMixin:
         dest.add(hairline())
         dest.add(labelled("When finished", self.dl_post))
         dest.add(self.dl_organize)
+        dest.add(labelled("Run a command when finished", self.dl_command))
+        dest.add(labelled("Computer, when finished", self.dl_power))
         dest.add(self.dl_autoresume)
 
         main = QWidget()
@@ -256,12 +280,12 @@ class DownloadMixin:
         if fresh := [link for link in links if link not in have]:
             current = self.dl_url_text.toPlainText().strip()
             self.dl_url_text.setPlainText((current + "\n" if current else "") + "\n".join(fresh))
-        if not isinstance(self.runner, DownloadRunner):
+        if self.dl_runner is None:
             self._dl_fetch()
 
     def open_magnets(self, links: list[str]) -> None:
         """Magnet links handed over by Windows (or by a second launch): bring the window up and add them."""
-        if not (self.is_processing or self.org_busy):
+        if not (self.is_processing or self.dl_runner is not None or self.org_busy):  # nothing going: bring the Download page up
             self._show_page("dl")
         magnet.bring_to_front(self)  # first: fetching can open a dialog that would otherwise sit behind other windows
         self._dl_add_links(links)
@@ -394,7 +418,7 @@ class DownloadMixin:
             self._dl_watcher = None
             return
         try:
-            WATCH_FOLDER.mkdir(parents=True, exist_ok=True)
+            paths.ensure_dir(WATCH_FOLDER)
         except OSError as exc:
             self.dl_watch.setChecked(False)
             self._toast(f"Couldn't make the watch folder {WATCH_FOLDER}: {exc.strerror or exc}", "warn", 6000)
@@ -414,8 +438,8 @@ class DownloadMixin:
             self._dl_add_links(links)
 
     def _dl_hand_to_organize(self) -> None:
-        folder = self._clean(self.dl_dest.text())
-        if folder and self._org_sources and "bysystem" in self.pages:
+        folder = str(self._dl_dest_path())
+        if self._org_sources and "bysystem" in self.pages:
             self._org_sources[0].setText(folder)
             self._show_page("bysystem")
             self._toast("The download folder is ready in Sort by System. Press Scan to see what's there.", "ok", 8000)
@@ -438,7 +462,7 @@ class DownloadMixin:
 
     def _dl_populate(self, files: list[RemoteFile], errors: list[str]) -> None:
         self._dl_prio().clear()
-        if not isinstance(self.runner, DownloadRunner):
+        if self.dl_runner is None:
             self.dl_fetch_btn.setEnabled(True)
         self.dl_model.set_files(files)
         self._dl_cleared, self._dl_next = False, []
@@ -497,7 +521,7 @@ class DownloadMixin:
         self._dl_update_sel()
 
     def _dl_select(self, on: bool) -> None:
-        if isinstance(self.runner, DownloadRunner):
+        if self.dl_runner is not None:
             return
         self._dl_toggle([i for i in self._dl_visible() if (i in self.dl_checked) != on])
 
@@ -506,20 +530,20 @@ class DownloadMixin:
         if part == "chevron":  # the arrow opens or closes the format choice (also while a run is going)
             self.dl_formats.toggle([self.dl_proxy.mapToSource(index).row()])
             return
-        if part == "panel" or isinstance(self.runner, DownloadRunner) or not index.isValid():
+        if part == "panel" or self.dl_runner is not None or not index.isValid():
             return
         if QApplication.keyboardModifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
             return  # extending the selection, not ticking
         self._dl_toggle([self.dl_proxy.mapToSource(index).row()])
 
     def _dl_rows_toggled(self, rows: list[int]) -> None:
-        if isinstance(self.runner, DownloadRunner):
+        if self.dl_runner is not None:
             return
         self._dl_toggle([self.dl_proxy.mapToSource(self.dl_proxy.index(r, 0)).row() for r in rows])
 
     # ---- right-click menu: open, start, stop, delete -------------------------------------------------------
     def _dl_runner(self) -> DownloadRunner | None:
-        return self.runner if isinstance(self.runner, DownloadRunner) else None
+        return self.dl_runner
 
     def _dl_is_live(self, row: int) -> bool:
         """Waiting for, or taking part in, the current run (or lined up behind it)."""
@@ -531,9 +555,16 @@ class DownloadMixin:
         picked = sorted(self.dl_table.selectionModel().selectedRows(), key=lambda ix: ix.row())
         return [self.dl_proxy.mapToSource(ix).row() for ix in picked]
 
-    def _dl_dest_path(self) -> Path | None:
+    @staticmethod
+    def _dl_default_dir() -> Path:
+        """Where downloads go when no Save to folder is set: the person's own Downloads folder (wherever the system keeps it)."""
+        loc = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+        return Path(loc) if loc else Path.home() / "Downloads"
+
+    def _dl_dest_path(self) -> Path:
+        """The Save to folder, or the Downloads folder when it has been left empty (so there is never nothing to save to)."""
         raw = self._clean(self.dl_dest.text())
-        return Path(raw) if raw else None
+        return Path(raw) if raw else self._dl_default_dir()
 
     def _dl_per_item(self, rf: RemoteFile) -> bool:
         return per_item_for(rf, self.dl_folders.isChecked())
@@ -560,7 +591,7 @@ class DownloadMixin:
 
         if rows:
             many = len(rows) > 1
-            blocked = self.org_busy or (self.is_processing and not running)  # a conversion owns the run controls
+            blocked = self.org_busy  # a conversion going does not get in the way: downloads have a run of their own
             ticked = [i for i in rows if i in self.dl_checked]
             has_links = any(self._dl_link(self.dl_files[i]) for i in rows)
             videos = [i for i in rows if self.dl_formats.expandable(self.dl_files[i])]
@@ -608,9 +639,6 @@ class DownloadMixin:
 
     def _dl_open_folder(self, rows: list[int]) -> None:
         dest = self._dl_dest_path()
-        if dest is None:
-            self.dl_status.setText("Choose a Save to folder first.")
-            return
         for i in rows:  # the first selected file that exists is shown in its folder, highlighted where Explorer allows
             rf = self.dl_files[i]
             if found := files_on_disk(rf, dest, self._dl_per_item(rf)):
@@ -632,7 +660,7 @@ class DownloadMixin:
         rows = [i for i in rows if i < len(self.dl_files) and i not in self.dl_model.removed]
         runner = self._dl_runner()
         if runner is None:
-            if rows and not (self.is_processing or self.org_busy):
+            if rows and not self.org_busy:
                 for i in rows:
                     self.dl_model.set_checked(i, True)
                 self._dl_update_sel()
@@ -687,13 +715,13 @@ class DownloadMixin:
         """The run that was in the way is over: start what was lined up behind it."""
         rows = [i for i in self._dl_next if i < len(self.dl_files) and i not in self.dl_model.removed]
         self._dl_next = rows
-        if not rows or self.is_processing:  # still busy: they stay lined up and are tried again when that run ends
+        if not rows or self.dl_runner is not None:  # still busy: they stay lined up and are tried again when that run ends
             return
         torrent = self.dl_files[rows[0]].url.startswith("torrent:")
         now = [i for i in rows if self.dl_files[i].url.startswith("torrent:") == torrent]
         self._dl_next = [i for i in rows if i not in now]  # the other kind follows when this run is over
         self._start_download(only=now)
-        if not self.is_processing:  # it didn't start (a message says why): don't leave anything waiting for nothing
+        if self.dl_runner is None:  # it didn't start (a message says why): don't leave anything waiting for nothing
             for i in rows:
                 self.dl_model.set_status(i, "")
             self._dl_next = []
@@ -729,20 +757,12 @@ class DownloadMixin:
             return
         dest = self._dl_dest_path()
         on_disk: list[Path] | None = None  # None = too many rows to look at, so assume there may be something
-        if dest is not None and len(rows) <= 500:
+        if len(rows) <= 500:
             on_disk = [p for i in rows for p in files_on_disk(self.dl_files[i], dest, self._dl_per_item(self.dl_files[i]))]
-        elif dest is None:
-            on_disk = []
         live = any(self._dl_is_live(i) for i in rows)
 
         name = self.dl_files[rows[0]].name.rsplit("/", 1)[-1]
         what = f'"{name}"' if len(rows) == 1 else f"{len(rows)} files"
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Delete Downloads")
-        box.setText(f"Remove {what} from the list?")
-        remove_btn = box.addButton("Remove from list", QMessageBox.ButtonRole.AcceptRole)
-        delete_btn = None
         if on_disk is None:
             detail = "'Delete files too' also deletes anything already downloaded of them from disk."
         elif on_disk:
@@ -754,19 +774,18 @@ class DownloadMixin:
                       "'Delete files too' removes them permanently (not to the Recycle Bin).")
         else:
             detail = "None of them have anything on disk yet."
-        if on_disk is None or on_disk:
-            delete_btn = box.addButton("Delete files too", QMessageBox.ButtonRole.DestructiveRole)
+        choices = [("Remove from list", "accept")]  # the safe choice is the one Enter picks
+        can_delete = on_disk is None or bool(on_disk)
+        if can_delete:
+            choices.append(("Delete files too", "destructive"))
+        choices.append(("Cancel", "reject"))
         if live:
             detail += "\n\nDownloads in progress are stopped first."
-        box.setInformativeText(detail)
-        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(remove_btn)  # the safe choice is the one Enter picks
-        box.setEscapeButton(cancel_btn)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is None or clicked is cancel_btn:
+        picked, _tick = msgbox.ask(self, "question", "Delete Downloads", f"Remove {what} from the list?", choices, default=0,
+                                   escape=len(choices) - 1, informative=detail)
+        if picked < 0 or picked == len(choices) - 1:
             return
-        self._dl_remove(rows, delete_from_disk=clicked is delete_btn)
+        self._dl_remove(rows, delete_from_disk=can_delete and picked == 1)
 
     def _dl_flash(self, idx: int, text: str) -> None:
         """A row that has just finished (green) or failed (red) washes in its colour and fades, so you can see which."""
@@ -804,7 +823,7 @@ class DownloadMixin:
         self.dl_checked = self.dl_checked - set(rows)
         self._dl_next = [i for i in self._dl_next if i not in self.dl_model.removed]
         self._dl_cleared = len(self.dl_files) == len(self.dl_model.removed)
-        if delete_from_disk and dest is not None:
+        if delete_from_disk:
             # A download that is only now letting go of its file can't be deleted until it has: the worker waits for that.
             busy = (lambda: any(runner.is_busy(i) for i in live)) if runner is not None and live else None
             threading.Thread(target=self._dl_delete_worker, args=(doomed, dest, busy), daemon=True).start()
@@ -832,7 +851,7 @@ class DownloadMixin:
                        + "\n".join(lines))
 
     def _start_download(self, only: list[int] | None = None) -> None:
-        if self.is_processing:
+        if self.dl_runner is not None or self.org_busy:  # one download run at a time (files are added to it as it goes); a conversion doesn't count
             return
         first = self._dl_prio()  # files sent to the front of the queue run before the rest
         picks = sorted((i for i in (self.dl_checked if only is None else only)
@@ -840,11 +859,7 @@ class DownloadMixin:
         if not picks:
             self._toast("Fetch a file list and tick at least one file first.", "warn", 6000)
             return
-        dest_raw = self._clean(self.dl_dest.text())
-        if not dest_raw:
-            self._error("Error", "Choose a folder to save the downloads in.")
-            return
-        dest = Path(dest_raw)
+        dest = self._dl_dest_path()  # an empty Save to box means the Downloads folder
         try:
             dest.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -859,76 +874,139 @@ class DownloadMixin:
         jobs = [(i, self.dl_files[i]) for i in picks]
         if all(is_torrent):
             if torbox_key():  # TorBox's cache is tried first; the swarm only gets what isn't cached
-                runner = TorBoxRunner(jobs, dest, threads, self.ui_q.put, self.pause_event, load_torrent_settings())
+                runner = TorBoxRunner(jobs, dest, threads, self._dl_emit, self.dl_pause_event, load_torrent_settings())
             elif service := debrid.torrent_service(LOGINS):  # Premiumize / Real-Debrid: cached files over HTTPS
-                runner = DebridTorrentRunner(jobs, dest, threads, self.ui_q.put, self.pause_event, load_torrent_settings(), service)
+                runner = DebridTorrentRunner(jobs, dest, threads, self._dl_emit, self.dl_pause_event, load_torrent_settings(), service)
             else:
                 if not self._torrent_ready(network=True):
                     return
-                runner = TorrentRunner(jobs, dest, self.ui_q.put, self.pause_event, load_torrent_settings())
+                runner = TorrentRunner(jobs, dest, self._dl_emit, self.dl_pause_event, load_torrent_settings())
         else:
             if not self._dl_login_check([self.dl_files[i].url for i in picks]):
                 return
             runner = DownloadRunner(jobs, dest, threads, self.dl_verify.isChecked(),
-                                    self.dl_folders.isChecked(), self.ui_q.put, self.pause_event)
+                                    self.dl_folders.isChecked(), self._dl_emit, self.dl_pause_event)
             runner.post_action = ("", "extract", "extract_delete")[self.dl_post.currentIndex()]
-        self._t0, self._paused_total, self._pause_t, self._eta_tick = time.monotonic(), 0.0, None, 0.0
+        self._dl_t0, self._dl_paused_total, self._dl_pause_t, self._dl_eta_tick = time.monotonic(), 0.0, None, 0.0
         self._dl_samples.clear()
-        self.is_processing, self.is_paused = True, False
-        self._begin_run_label()  # "Downloading..." (or "Saving..." on the soundtrack page)
-        self.pause_event.set()
-        self.start_btn.setEnabled(False)
-        self.pause_btn.setEnabled(True)
-        self.stop_btn.setEnabled(True)
-        self.pause_btn.setText("Pause")
+        self.dl_paused = self.dl_stopping = False
+        self._dl_page = "sound" if self.current_page == "sound" else "dl"  # whichever Download page it is, even if a queued run starts from elsewhere
+        self._dl_label = self._busy_label(self._dl_page)  # "Downloading..." (or "Saving..." on the soundtrack page)
+        self.dl_pause_event.set()
+        self.dl_runner = runner
+        self._sync_run_controls()
         self.dl_fetch_btn.setEnabled(False)
-        self.lbl_phase.setText("Phase: Downloading")
-        info = f"DOWNLOAD  |  {len(picks)} file(s)  ->  {dest}"
-        self.lbl_run_info.setText(info if len(info) <= 80 else info[:38] + "..." + info[-39:])
-        self.lbl_eta.setText("")
-        self._set_bar(0, max(1, runner.bytes_total))
-        self.lbl_total_prog.setText(f"Download Progress: 0 / {runner.files_total}")
+        self.dl_eta.setText("")
+        self._set_dl_bar(0, max(1, runner.bytes_total))
+        self._dl_prog_text = f"Download Progress: 0 / {runner.files_total}"
         for i in picks:
             self.dl_model.set_status(i, "Queued")
-        self.runner = runner
         self._dl_save_soon()  # records that a run is in progress, so a restart can pick it up again
-        self._set_settings_visible(False)  # the log gets the window while it runs
         threading.Thread(target=runner.run, daemon=True).start()
+
+    def _dl_emit(self, ev: tuple) -> None:
+        """How the download run reports in. Its log lines are marked, so they don't read as the conversion's in the shared log."""
+        self.ui_q.put(("log", f"[download] {ev[1]}") if ev and ev[0] == "log" else ev)
+
+    def _dl_active_secs(self) -> float:
+        """Seconds the download run has actually been going (paused time doesn't count)."""
+        if self._dl_t0 is None:
+            return 0.0
+        now = time.monotonic()
+        return now - self._dl_t0 - self._dl_paused_total - (now - self._dl_pause_t if self._dl_pause_t else 0.0)
+
+    def _set_dl_bar(self, done: float, total: float) -> None:
+        """The download run's own bar. Like the conversion's it always runs 0..1000, since a big download's byte count won't fit."""
+        value = int(1000 * min(1.0, max(0.0, done / total))) if total > 0 else 0
+        motion.ease_value(self.dl_pb, value)
+        if not (self.is_processing or self.org_busy):  # the title shows a conversion's progress in preference to a download's
+            self._title_progress(value // 10, self.dl_paused)
+
+    def _dl_toggle_pause(self) -> None:
+        if self.dl_runner is None:
+            return
+        if self.dl_paused:
+            self.dl_paused = False
+            if self._dl_pause_t is not None:
+                self._dl_paused_total += time.monotonic() - self._dl_pause_t
+                self._dl_pause_t = None
+            self.dl_pause_event.set()
+            self._dl_emit(("log", "--- RESUMED ---"))
+        else:
+            self.dl_paused = True
+            self._dl_pause_t = time.monotonic()
+            self.dl_pause_event.clear()
+            self._dl_emit(("log", "--- PAUSED ---"))
+        self._sync_run_controls()  # the button says Resume while paused
+        self._refresh_dl(True)
+
+    def _dl_stop_run(self) -> None:
+        runner = self.dl_runner
+        if runner is None or self.dl_stopping:
+            return
+        if not self._ask("Stop", "Stop the download now?\n\nPartly downloaded files are kept and resume next time."):
+            return
+        self.dl_stopping = True
+        self._dl_clear_next()  # stopping the run means files lined up behind it don't start either
+        self._sync_run_controls()
+        self._dl_emit(("log", "--- STOP requested ---"))
+        threading.Thread(target=runner.shutdown, daemon=True).start()  # killing children can take a moment
+
+    def _dl_cleanup_ui(self) -> None:
+        """The download run is over. Nothing of a conversion going alongside it is touched."""
+        secs, stopped = self._dl_active_secs(), self.dl_stopping
+        prog = self._dl_prog_text
+        self.dl_runner = None
+        self.dl_stopping = self.dl_paused = False
+        self._dl_t0 = None
+        if not (self.is_processing or self.org_busy):
+            self._title_progress(None)
+        self.dl_eta.setText(f"{'Stopped after' if stopped else 'Finished in'} {fmt_duration(secs)}")
+        if stopped:  # a stopped run didn't get anywhere: the bar starts over (partial files resume next time)
+            motion.ease_value(self.dl_pb, 0)  # a reset jumps, and cancels a glide still in flight
+        self.dl_fetch_btn.setEnabled(True)
+        self._sync_run_controls()  # back to "Start Download"
+        self._runbar_sync()  # the bar along the bottom goes
+        if not stopped:
+            self._notify_run_done(secs, prog)
 
     def _dl_threads_changed(self, n: int) -> None:
         """The spinbox applies live: a running download picks up the new limit straight away."""
         self._dl_save_soon()
-        if isinstance(self.runner, DownloadRunner):
-            self.runner.set_threads(n)
+        if self.dl_runner is not None:
+            self.dl_runner.set_threads(n)
 
     def _refresh_dl(self, force: bool = False) -> None:
-        r = self.runner
-        if not isinstance(r, DownloadRunner) or self._t0 is None:
+        r = self.dl_runner
+        if r is None or self._dl_t0 is None:
             return
         now = time.monotonic()
-        if not force and now - self._eta_tick < 0.5:
+        if not force and now - self._dl_eta_tick < 0.5:
             return
-        self._eta_tick = now
+        self._dl_eta_tick = now
         self._st_refresh_status()
         done, total = r.bytes_done, r.bytes_total
-        self._set_bar(min(done, total), max(1, total))
-        self.lbl_total_prog.setText(f"Download Progress: {r.files_finished} / {r.files_total}")
-        t, samples = self._active_secs(), self._dl_samples
+        self._set_dl_bar(min(done, total), max(1, total))
+        self._dl_prog_text = f"Download Progress: {r.files_finished} / {r.files_total}"
+        t, samples = self._dl_active_secs(), self._dl_samples
         if not samples or t - samples[-1][0] >= 1.0:
             samples.append((t, done))
         while len(samples) > 2 and t - samples[0][0] > 20:  # speed = the last ~20 seconds
             samples.popleft()
         head = f"Elapsed: {fmt_duration(t)}  |  {fmt_size(done)} of {fmt_size(total)}"
-        if self.is_paused:
-            self.lbl_eta.setText(f"{head}  |  Paused")
+        if self.dl_stopping:
+            self.dl_eta.setText(f"{head}  |  Stopping...")
+            return
+        if self.dl_paused:
+            self.dl_eta.setText(f"{head}  |  Paused")
             return
         t0, b0 = samples[0]
         speed = (done - b0) / (t - t0) if t > t0 else 0.0
         if speed <= 0:
-            self.lbl_eta.setText(f"{head}  |  Starting...")
+            self.dl_eta.setText(f"{head}  |  Starting...")
         else:
             left = f"  |  Est. remaining: ~{fmt_duration((total - done) / speed)}" if total > done else ""
-            self.lbl_eta.setText(f"{head}  |  {fmt_size(int(speed))}/s{left}")
+            self.dl_eta.setText(f"{head}  |  {fmt_size(int(speed))}/s{left}")
 
     def _show_dl_summary(self, sm: DownloadSummary) -> None:
         self._st_on_run_done(sm)  # soundtracks saved in this run: summary, tags, covers
@@ -944,16 +1022,77 @@ class DownloadMixin:
             self._toast(f"Downloads complete: {', '.join(parts)} in {took}.", "ok", 15000)
             if self.dl_organize.isChecked() and (sm.done or sm.skipped) and not sm.stopped:
                 self._dl_hand_to_organize()
+            self._dl_run_after_actions(sm)
             return
         lines = [f"  - {name}: {reason}" for _i, name, reason in sm.failures[:12]]
         if len(sm.failures) > 12:
             lines.append(f"  ...and {len(sm.failures) - 12} more (see the Status column)")
+        if self.dl_power.currentIndex() > 0 and not sm.stopped:  # left to run on its own: no question to wait on
+            self._toast(f"Downloads finished: {', '.join(parts)}, {len(sm.failures)} failed (see the Status column).", "warn", 15000)
+            self._dl_run_after_actions(sm)
+            return
         text = (f"{', '.join(parts)}, {len(sm.failures)} failed, in {took}.\n\nFailed:\n" + "\n".join(lines)
                 + "\n\nPartial downloads are kept, so a retry resumes where each one stopped.\n\n"
                   "Retry the failed files now?")
         retry, cancel = QMessageBox.StandardButton.Retry, QMessageBox.StandardButton.Cancel
-        if QMessageBox.warning(self, "Downloads Finished with Errors", text, retry | cancel, retry) == retry:
+        if msgbox.warning(self, "Downloads Finished with Errors", text, retry | cancel, retry) == retry:
             self._start_download(only=[i for i, _name, _why in sm.failures])
+        else:
+            self._dl_run_after_actions(sm)
+
+    def _dl_run_after_actions(self, sm: DownloadSummary) -> None:
+        """The run is over: run the person's command (if any), then (if it worked) sleep / hibernate / shut down. Nothing
+        happens after a stop by hand."""
+        command, power = self.dl_command.text().strip(), afteractions.POWER[self.dl_power.currentIndex()]
+        if sm.stopped or not (command or power):
+            return
+        if not command:
+            self._dl_after_power(power)
+            return
+        proc, problem = afteractions.start_command(command, self._dl_dest_path(), list(sm.finished), len(sm.failures))
+        if proc is None:
+            self._toast(f"Couldn't run your command: {problem}." + (" The computer was left as it is." if power else ""), "warn", 10000)
+            return
+        self._dl_cmd_proc, self._dl_cmd_power, self._dl_cmd_ticks = proc, power, 0
+        self._toast("Running your command...", "ok", 4000)
+        self._dl_cmd_timer.start()
+
+    def _dl_cmd_poll(self) -> None:
+        proc = self._dl_cmd_proc
+        if proc is None:
+            self._dl_cmd_timer.stop()
+            return
+        code = proc.poll()
+        if code is None:
+            self._dl_cmd_ticks += 1
+            if self._dl_cmd_ticks < afteractions.COMMAND_TIMEOUT:
+                return
+            with contextlib.suppress(OSError):
+                proc.kill()
+            code = -1
+        self._dl_cmd_timer.stop()
+        self._dl_cmd_proc = None
+        power, self._dl_cmd_power = self._dl_cmd_power, ""
+        if code != 0:
+            self._toast(f"Your command ended with code {code}." + (" The computer was left as it is." if power else ""), "warn", 10000)
+            return
+        self._toast("Your command finished.", "ok", 4000)
+        self._dl_after_power(power)
+
+    def _dl_after_power(self, power: str) -> None:
+        if not power:
+            return
+        dialog = PowerCountdown(self, afteractions.POWER_PHRASES[power])
+        dialog.go.connect(lambda: self._dl_do_power(power))
+        dialog.called_off.connect(lambda: self._toast("Cancelled: the computer was left as it is.", "ok", 5000))
+        self._dl_power_dialog = dialog  # kept alive until it is closed
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _dl_do_power(self, power: str) -> None:
+        if problem := afteractions.perform_power(power):
+            self._toast(f"Couldn't {afteractions.POWER_PHRASES[power]}: {problem}", "warn", 10000)
 
     def _dl_save_soon(self) -> None:
         self._dl_save_timer.start()  # restarts the 1.5 s countdown
@@ -977,8 +1116,8 @@ class DownloadMixin:
                 "verify": self.dl_verify.isChecked(),
                 "folders": self.dl_folders.isChecked(),
                 "filter": self.dl_filter.text(),
-                "was_running": isinstance(self.runner, DownloadRunner),
-                "interrupted": bool(self.is_processing and isinstance(self.runner, DownloadRunner)),
+                "was_running": self.dl_runner is not None,
+                "interrupted": self.dl_runner is not None,
                 "auto_resume": self.dl_autoresume.isChecked(),
                 "post": self.dl_post.currentIndex(),
                 "organize_after": self.dl_organize.isChecked(),
@@ -1035,10 +1174,10 @@ class DownloadMixin:
             self._show_page("dl")
         if data.get("interrupted") and self.dl_autoresume.isChecked() and self.dl_checked:
             self.dl_status.setText(self.dl_status.text() + "  Resuming the interrupted downloads...")
-            QTimer.singleShot(2000, lambda: None if self.is_processing else self._start_download())
-        dest, per_item = self._clean(self.dl_dest.text()), self.dl_folders.isChecked()
-        if dest and (picks := sorted(self.dl_checked)):
-            threading.Thread(target=self._dl_scan_disk, args=(files, picks, Path(dest), per_item, self._dl_epoch),
+            QTimer.singleShot(2000, lambda: None if self.dl_runner is not None else self._start_download())
+        dest, per_item = self._dl_dest_path(), self.dl_folders.isChecked()
+        if picks := sorted(self.dl_checked):
+            threading.Thread(target=self._dl_scan_disk, args=(files, picks, dest, per_item, self._dl_epoch),
                              daemon=True).start()
 
     def _dl_scan_disk(self, files: list[RemoteFile], picks: list[int], dest: Path, per_item: bool, epoch: int) -> None:

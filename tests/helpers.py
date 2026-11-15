@@ -19,13 +19,14 @@ if str(ROOT) not in sys.path:
 
 
 class WindowTestCase(unittest.TestCase):
-    """Own Qt objects and the window module's hard-exit stub for exactly one test."""
+    """Own Qt objects, unattended dialogs and the window's hard-exit stub for one test."""
 
     def setUp(self):
         super().setUp()
         from unittest import mock
+        from PySide6.QtCore import QTimer
         from PySide6.QtWidgets import QApplication
-        from distill.ui import main_window, motion
+        from distill.ui import main_window, motion, now_playing
         from distill.ui.theme import T
 
         app = QApplication.instance()
@@ -40,7 +41,31 @@ class WindowTestCase(unittest.TestCase):
         patcher = mock.patch.object(main_window, "os", proxy)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+        # A real preview still opens when a test clicks the cover. Dismiss it on
+        # the next event-loop turn so that it needs no person at the keyboard.
+        preview_exec = now_playing.ArtPreview.exec
+
+        def exec_preview(dialog):
+            QTimer.singleShot(0, dialog.accept)
+            return preview_exec(dialog)
+
+        preview = mock.patch.object(now_playing.ArtPreview, "exec", exec_preview)
+        preview.start()
+        self.addCleanup(preview.stop)
         self.addCleanup(self.cleanup_widgets)
+
+    def _callCleanup(self, function, /, *args, **kwargs):
+        from unittest import mock
+        from distill.ui.main_window import DistillWindow
+
+        window = getattr(function, "__self__", None)
+        if isinstance(window, DistillWindow) and getattr(function, "__name__", "") == "close":
+            # Failed assertions may leave a stubbed job marked active. Cleanup
+            # takes the production Quit path; close calls in test bodies still ask.
+            with mock.patch.object(window, "_ask", return_value=True):
+                return super()._callCleanup(function, *args, **kwargs)
+        return super()._callCleanup(function, *args, **kwargs)
 
     def cleanup_widgets(self):
         import gc

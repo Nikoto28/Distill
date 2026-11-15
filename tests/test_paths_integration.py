@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -55,6 +56,47 @@ class PersistenceTests(unittest.TestCase):
     def setUp(self):
         previous_umask = os.umask(0o077)
         self.addCleanup(os.umask, previous_umask)
+
+    def test_media_and_watch_paths_use_xdg_or_legacy_layout_without_creating_state(self):
+        from distill import constants, folderwatch, gamemedia, paths
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            app = base / "app"
+            app.mkdir()
+            for platform, portable in (("linux", "0"), ("linux", "1"), ("win32", "0")):
+                env = {"XDG_CACHE_HOME": str(base / "cache"), "XDG_DATA_HOME": str(base / "data"),
+                       "DISTILL_PORTABLE": portable}
+                with self.subTest(platform=platform, portable=portable), mock.patch.dict(os.environ, env), \
+                        mock.patch.object(sys, "platform", platform), mock.patch.object(paths, "APP_DIR", app), \
+                        mock.patch.object(constants, "APP_DIR", app):
+                    modules = []
+                    for source in (gamemedia, folderwatch):
+                        name = "distill._path_fixture_" + source.__name__.rsplit(".", 1)[-1]
+                        spec = importlib.util.spec_from_file_location(name, source.__file__)
+                        module = importlib.util.module_from_spec(spec)
+                        with mock.patch.dict(sys.modules, {name: module}):
+                            spec.loader.exec_module(module)
+                        modules.append(module)
+                    media, watch = modules
+                    cache, data = ((base / "cache/distill", base / "data/distill")
+                                   if platform == "linux" and portable == "0" else (app, app))
+                    self.assertEqual(media.MEDIA_DIR, cache / "game_media")
+                    self.assertEqual(watch.WATCH_FOLDER, data / "Watch")
+                    self.assertIsNone(media.cached_recomp_banner("Fixture"))
+                    self.assertEqual(media.cached_screenshots("fixture"), [])
+                    self.assertFalse(media.MEDIA_DIR.exists())
+                    self.assertFalse(watch.WATCH_FOLDER.exists())
+            self.assertEqual(list(base.iterdir()), [app])
+
+    def test_game_database_creates_its_missing_xdg_data_parent(self):
+        from distill import games, recomps
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(recomps, "ROOT", None):
+            base = Path(temp)
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(base / "data"), "DISTILL_PORTABLE": "0"}):
+                store = games.GameStore()
+                self.assertEqual(store.path, base / "data/distill/recomps/games.db")
+                self.assertTrue(store.path.is_file())
+                self.assertEqual(stat.S_IMODE(store.path.parent.stat().st_mode), 0o700)
 
     @unittest.skipIf(os.name == "nt", "package fixture uses POSIX executable stand-ins")
     def test_batch_fixture_keeps_package_logs_in_its_own_directory(self):
@@ -254,7 +296,7 @@ class PersistenceTests(unittest.TestCase):
                  (ytdlp, "SETTINGS_FILE", ytdlp.save_settings),
                  (crashlog, "CRASH_FILE", lambda: crashlog.record(ValueError, ValueError("synthetic"), None)),
                  (apikeys, "FILE", lambda: apikeys.set("github", "synthetic")),
-                 (downloads, "LOGIN_FILE", lambda: downloads.save_logins(True))]
+                 (apikeys, "FILE", lambda: downloads.save_logins(True))]
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(netrules.RULES, "global_kbps", 1), \
                 mock.patch.dict(downloads.LOGINS, {"custom": [{"host": "invalid.test", "secret": "synthetic"}]}):
             for index, (module, name, writer) in enumerate(cases):

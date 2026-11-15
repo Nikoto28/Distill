@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel, QPushButton,
+    QAbstractItemView, QButtonGroup, QComboBox, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -23,6 +23,7 @@ from ..switchconv import (
 from ..system import resolve_tool_path
 from . import motion
 from .emu_cards import segment_css, TwoColumn
+from .frameless import FramelessDialog
 from .state import LABEL_W
 from .theme import T
 from .title_dialog import TitleDialog
@@ -526,10 +527,8 @@ class SwitchMixin:
             self._info("Review groups", "No .nsp / .xci / .nsz / .xcz files were found in the source folder.")
             return
         ids, games, unknown = review_files(files, self._sw_links)
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Review groups")
-        dlg.resize(860, 480)
-        lay = QVBoxLayout(dlg)
+        dlg = FramelessDialog(self, "Review groups", "list", (860, 480), (640, 360))
+        lay = dlg.body()
         lay.addWidget(hint(f"{len(files)} file(s), {len(unknown)} not recognised. Files are placed by the data inside them, then by the "
                            "[Title ID] in their names. For one that couldn't be placed, choose the game it belongs to."))
         table = QTableWidget(len(files), 3)

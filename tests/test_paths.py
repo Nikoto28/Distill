@@ -28,7 +28,7 @@ class ConsumerPathsTests(unittest.TestCase):
     @unittest.skipUnless(HOST_LINUX, "import-time XDG constants require a native Linux host")
     def test_linux_constants_use_xdg_categories(self):
         from distill import apikeys, crashlog, formats, torrentsearch
-        for actual, category in ((downloads.LOGIN_FILE, "CONFIG"), (downloads.SESSION_FILE, "STATE"),
+        for actual, category in ((apikeys.LEGACY_LOGINS_FILE, "CONFIG"), (downloads.SESSION_FILE, "STATE"),
                                  (netrules.RULES_FILE, "CONFIG"), (soundtracks.CACHE_FILE, "CACHE"),
                                  (torrents.TORRENT_DIR, "STATE"), (torrents.TORRENT_FILE, "CONFIG"),
                                  (ytdlp.SETTINGS_FILE, "CONFIG"), (soundtracks.PREFS_FILE, "CONFIG"),

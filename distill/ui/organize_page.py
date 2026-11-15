@@ -230,20 +230,24 @@ class OrganizeMixin:
     def _org_set_busy(self, busy: bool, label: str = "Working...") -> None:
         self.org_busy = busy
         self._org_label = label
-        self._update_start_text()
-        self.stop_btn.setEnabled(busy)  # an Organize run can be stopped between items; each finished item stays undoable
+        if busy and label != "Scanning...":
+            self._org_page = self.current_page  # the page this job was started from: the bar along the bottom leads back to it
         for st in self.org.values():
             st.scan_btn.setEnabled(not busy)
             st.undo_btn.setEnabled(not busy)
             st.report_btn.setEnabled(not busy and bool(st.findings))
-        if not self.is_processing and not self._pending_tools:
-            self.start_btn.setEnabled(not busy)
+        self._sync_run_controls()  # Stop is live while it runs (an Organize run can be stopped between items; each finished item stays undoable)
+        self._runbar_sync()
+
+    def _org_blocked(self) -> bool:
+        """Organise moves files about, so it waits for a conversion or a download to finish (and the other way round)."""
+        return self.org_busy or self.is_processing or self.dl_runner is not None
 
     def _org_folder(self) -> str:
         return self._clean(self._org_sources[0].text())
 
     def _org_scan(self, key: str) -> None:
-        if self.org_busy or self.is_processing:
+        if self._org_blocked():
             return
         raw = self._org_folder()
         if not raw or not Path(raw).is_dir():
@@ -376,6 +380,9 @@ class OrganizeMixin:
     def _org_apply(self) -> None:
         if self.org_busy:
             return
+        if self.is_processing or self.dl_runner is not None:
+            self._toast("A run is in progress: apply this when it has finished.", "warn", 5000)
+            return
         key = self.current_page
         st = self.org[key]
         tool = st.tool
@@ -405,14 +412,14 @@ class OrganizeMixin:
         self._org_stop.clear()
         self._log_clear()
         self.ui_q.put(("log", f"=== {APP_NAME} {APP_VERSION} ===\n--- {tool.title} started: {len(picks)} item(s) ---\n"))
-        self._update_ui_state("Organizing", 0, len(picks))
+        self._update_ui_state("Organising", 0, len(picks))
 
         def work() -> None:
             ok, failures = 0, []
             try:
                 ok, failures = apply_findings(
                     tool.key, picks, lambda m: self.ui_q.put(("log", m)),
-                    lambda cur, total: self.ui_q.put(("progress", "Organizing", cur, total)), self._org_stop,
+                    lambda cur, total: self.ui_q.put(("progress", "Organising", cur, total)), self._org_stop,
                     lambda n, text: self.ui_q.put(("org_row", key, pick_rows[n], text)), tool.title)
             except Exception as exc:
                 failures = [("(run aborted)", f"{type(exc).__name__}: {exc}")]
@@ -442,7 +449,7 @@ class OrganizeMixin:
         self._org_scan(key)  # refresh the list: finished items drop off
 
     def _org_undo(self, key: str) -> None:
-        if self.org_busy or self.is_processing:
+        if self._org_blocked():
             return
         page = self.org[key].page
         step = newest_undo_step([t.key for t in page.steps])

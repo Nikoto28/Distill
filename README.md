@@ -31,17 +31,17 @@ On Windows, settings and downloaded tools are kept next to the `.exe`, so both b
 ### Linux runtime files
 
 Linux uses per-user XDG locations: config in `$XDG_CONFIG_HOME/distill` (default `~/.config/distill`),
-installed tools and recomps in `$XDG_DATA_HOME/distill` (default `~/.local/share/distill`),
+installed tools, recomps and the Watch inbox in `$XDG_DATA_HOME/distill` (default `~/.local/share/distill`),
 state in `$XDG_STATE_HOME/distill` (default `~/.local/state/distill`), and caches in
-`$XDG_CACHE_HOME/distill` (default `~/.cache/distill`). Empty or non-absolute overrides use the defaults.
+`$XDG_CACHE_HOME/distill` (default `~/.cache/distill`), including `game_media` artwork and achievements. Empty or non-absolute overrides use the defaults.
 Bundled assets stay with the application. This path layout does not imply complete Linux support.
 
 Set `DISTILL_PORTABLE=1` to keep runtime files beside the source launcher or frozen executable instead.
 An unwritable portable directory reports the existing write error; it never selects another location.
 At normal startup, missing XDG files are copied from legacy settings, emulator/recomp catalogs, forks,
 yt-dlp/torrent/soundtrack preferences, soundtrack saves, and known Organize undo histories. Existing XDG
-content wins and originals are preserved. Login-data files (API keys and logins), rules (which may contain
-passwords), queue sessions and torrent directories, logs, caches, tools/recomps trees and user libraries
+content wins and originals are preserved. Credentials are handled separately by the unified store described
+below. Rules (which may contain passwords), queue sessions and torrent directories, logs, caches, tools/recomps trees and user libraries
 are **not automatically migrated**; deferred files stay beside the app and remain usable in portable mode.
 
 **Updates:** Distill checks GitHub for a newer release when it starts and asks whether to install it. You can update in one click, skip a version, or ignore it. Your settings and tools are kept.
@@ -50,16 +50,22 @@ are **not automatically migrated**; deferred files stay beside the app and remai
 
 ### Games
 
-- **PC Recomps** is a poster grid of native PC ports of console games (Ship of Harkinian, Zelda 64: Recompiled, Starship and more). Install, update and play with one click from each project's own GitHub release, checked against the published checksum. Updates keep your saves. *Check my library* shows which games you already have the dump for. Nothing is ever downloaded or converted for you.
+- **PC Recomps** is a poster grid of native PC ports of console games (Ship of Harkinian, Zelda 64: Recompiled, Starship and more). Install, update and play with one click from each project's own GitHub release, checked against the published checksum. Updates keep your saves. *Check my library* shows which games you already have the dump for. Nothing is ever downloaded or converted for you. **Add recomp...** puts a project that isn't on any list yet on the page: give its GitHub address and Distill fills in what it can, then you say what game it plays and what kind of project it is. It installs and updates like the rest, and you can edit or remove it later.
 - **Emulators** is a catalog of about 36 emulators with install, update and launch.
+- **Games library > Libraries > Import / export > Export RetroArch playlists** writes a playlist for each platform, your favourites and each collection into RetroArch's playlist folder. A playlist RetroArch already has keeps everything in it and only gains the games it was missing.
+- **Games library > Libraries > Import / export > Import history** brings your favourites, play time, stars, progress and collections across from a LaunchBox folder or a Playnite JSON export. Only games already in your library are updated, nothing you set in Distill is overwritten, and importing twice changes nothing.
 
 ### Downloads
 
 - **Files & Torrents** is a download queue for direct links, archive.org, torrents, debrid services (including TorBox) and video or audio sites through yt-dlp. It has speed limits, schedules and per-site limits, resumes partial files, and has a right-click menu for starting, stopping and deleting.
+  - **Save to** can be left empty: downloads then go to your Downloads folder, which the box shows as its placeholder.
   - **Scan a page for links:** paste `scan:https://example.com/page` (or `scan[zip,7z]:https://...` to pick file types) and every download link on that page is listed: files, magnets and links to Drive, MediaFire, Dropbox, OneDrive, Pixeldrain, 1fichier and archive.org. Pixeldrain lists are expanded into their files.
-  - **Watch folder:** switch it on in Settings > Downloads, then drop a `.txt`, `.torrent`, `.magnet` or `.url` file into the `Watch` folder beside Distill and its links are listed. Taken files move into `Watch/queued`.
+  - **Watch folder:** switch it on in Settings > Downloads, then drop a `.txt`, `.torrent`, `.magnet` or `.url` file into `Watch` under the Linux XDG data directory, or beside Distill on Windows and in portable mode. Its links are listed; taken files move into `Watch/queued`.
   - **Unpacking:** multi-part sets (`.part1.rar`, `.7z.001`, `.rar` + `.r00`, `.zip` + `.z01`) are unpacked from the first part and, with "then delete them", every part goes afterwards. Password-protected archives are tried with each line of `distill_archive_passwords.txt` (next to Distill), then with ones worked out from the site the file came from (`www.site.com`, `site.com`, `site`), then with their own name.
-- **Soundtrack Grabber** takes a list of game names (or reads them from your library) and finds each game's soundtrack on archive.org. It scores the matches, previews tracks, and can fill in missing tags and cover art.
+  - **FTP:** paste an `ftp://` or `ftps://` address (`ftp://user:password@host/path` if it needs a login, or save one under Settings > API keys > Downloads). A folder is listed with everything under it; downloads resume. FTP does not use the proxy rules.
+  - **Site headers:** under Settings > Downloads > per-site rules, a site can have a Referer (`auto` = its own front page), a User-Agent and extra `Name: value` headers. They are sent only to that site, never on a redirect to another one.
+  - **When finished:** run a command of your own (`"C:\Tools\sync.bat" {folder}`; also `{list}`, `{count}`, `{failed}`), then optionally sleep, hibernate or shut down after a 60-second countdown you can cancel. Nothing happens if you stopped the downloads yourself, and the power option resets to Nothing each time Distill starts.
+- **Soundtrack Grabber** is a music-player style page: one search bar, and the albums found laid out with the cover on the left and the tracks on the right. Tracks stream from KHInsider (archive.org is searched too); saving uses KHInsider (FLAC when available) and falls back to archive.org. It can fill in missing tags and cover art.
 
 ### Convert & compress
 
@@ -90,7 +96,10 @@ Work through the pages in order. Every change can be previewed first, and every 
 ### Interface
 
 - Dark and light themes (click the Distill logo)
-- `Ctrl+K` to jump to any page, `Ctrl+1` to `Ctrl+9` for the first nine, `Ctrl+,` for Settings
+- `Ctrl+K` to jump to any page, `Ctrl+1` to `Ctrl+9` for the first nine pinned tools, `Ctrl+,` for Settings
+- **Compact sidebar** (`Ctrl+B`, the button beside the logo, or Settings > Sidebar): the sidebar tucks away to the left and the page uses the whole window. Move the mouse to the left edge and it eases out over the page; move away and it eases back
+- **Pin and unpin tools** under Settings > Sidebar to keep only the ones you use in the sidebar. Unpinned tools stay available from `Ctrl+K`
+- **Runs don't lock the window.** Start a conversion or download, then go anywhere in the app. A bar along the bottom shows what is running and its percentage; click it to return to that page. Conversions and other tool jobs go one at a time, but downloads (games, soundtracks) run on their own, so one can go while a conversion does; each page's Start, Pause and Stop control that page's own run. Organise still waits for either to finish, since it moves files.
 - Searchable, copyable log with coloured errors, warnings and verified lines
 - Window layout, folders and options remembered between runs
 - Taskbar progress and a notification when a long run finishes
@@ -109,14 +118,21 @@ On Windows you can also double-click `Distill.pyw`.
 
 ### Optional keys
 
-Distill works without any keys. These only raise rate limits or add artwork:
+Distill works without any keys. They only raise rate limits, add artwork or sign you in to a file host. Everything lives in **Settings > API keys**, in folders so you only open what you use:
 
-| Key | Used for |
-| --- | --- |
-| `GITHUB_TOKEN` | Read-only token. Raises GitHub's limit from 60 to 5,000 requests an hour (PC Recomps, tool updates) |
-| `SGDB_API_KEY` | steamgriddb.com key for portrait posters in PC Recomps |
+| Folder | Holds | Used for |
+| --- | --- | --- |
+| Games & artwork | SteamGridDB, RetroAchievements | Posters, covers and icons for Games, PC Recomps and Emulators; a game's achievements |
+| Downloads & file hosts | archive.org, 1fichier, TorBox and other debrid services, Prowlarr, any other site | Sign-ins for the Files & Torrents page, cached torrents, more torrent search |
+| Updates | GitHub | A read-only token raises GitHub's limit from 60 to 5,000 requests an hour (tool, emulator and recomp update checks) |
 
-The easiest way is **Settings > General > API keys**: paste a key there and it is saved (encrypted for your Windows account) and used straight away, in a downloaded build too. Otherwise set them as environment variables, or copy `distill/local_keys.example.py` to `distill/local_keys.py` (git-ignored). Never put a key you care about in a build you share, since it can be read back out of the `.exe`.
+Paste a key there and it is saved and used straight away, in a downloaded build too. Keys and remembered logins share **one file, `distill_keys.json`**: in `$XDG_CONFIG_HOME/distill` (default `~/.config/distill`) on Linux, or next to the app on Windows and with `DISTILL_PORTABLE=1`. It is encrypted for your Windows account, or with the system keyring where available; otherwise it uses plain text with owner-only permissions. An encrypted file moved to another computer or account may be unreadable.
+
+On its first read, the store folds in the older `distill_apikeys.json` and `distill_logins.json` from the same directory; existing unified entries win, and custom logins merge by host. On Linux it also imports app-folder credentials (including an older `distill_keys.json`), preserving those originals. Migration is finalized once inside the sealed store after durable publication and verification; only verified, imported same-directory files can then be removed. Unreadable legacy files are left untouched, reported, and never imported later. An unreadable unified store blocks fallback imports; the current unified file is never replaced while unreadable. Finalization survives forgetting every credential, so retained files cannot restore forgotten sign-ins. Failed publication retains every original and retries only on the next start. The general startup path migration does not copy credential files.
+
+Credential updates and migration share an owner-only sibling lock file that serializes individual storage transactions. Multiple Distill instances or other writers editing the same credentials are not synchronized; the last save wins. Lock acquisition has a bounded wait; failure leaves stored credentials untouched. Only regular, non-symlink credential files up to 1 MiB are read; rejected files remain untouched.
+
+Otherwise set `GITHUB_TOKEN` / `SGDB_API_KEY` as environment variables, or copy `distill/local_keys.example.py` to `distill/local_keys.py` (git-ignored). A key saved in Settings is used first. Never put a key you care about in a build you share, since it can be read back out of the `.exe`.
 
 ## Development
 
@@ -153,6 +169,7 @@ distill/
   organize.py, library.py, systems.py organiser tools
   downloads.py, torrents.py, torbox.py, ytdlp.py   downloader
   crawl.py, hosters.py, folderwatch.py, postprocess.py   page scanner, file hosts, watch folder, unpacking
+  ftpclient.py, afteractions.py       FTP / FTPS, and the command / sleep / shutdown after a run
   recomps.py, emulators.py            PC Recomps and Emulators catalogs
   soundtracks.py                      Soundtrack Grabber
   switchconv.py                       Switch NSZ / NUP

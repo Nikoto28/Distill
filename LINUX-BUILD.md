@@ -14,16 +14,35 @@ Linux uses `distill.paths`, whether the application folder is writable or mounte
 
 | Files | Directory | Default |
 | --- | --- | --- |
-| Settings and catalog overrides | `$XDG_CONFIG_HOME/distill` | `~/.config/distill` |
-| Downloaded tools, managed installs and data | `$XDG_DATA_HOME/distill` | `~/.local/share/distill` |
+| Settings, catalog overrides and `distill_keys.json` | `$XDG_CONFIG_HOME/distill` | `~/.config/distill` |
+| Downloaded tools, managed installs, `recomps/games.db` and `Watch` inbox | `$XDG_DATA_HOME/distill` | `~/.local/share/distill` |
 | Logs, undo records and runtime state | `$XDG_STATE_HOME/distill` | `~/.local/state/distill` |
-| Downloadable caches | `$XDG_CACHE_HOME/distill` | `~/.cache/distill` |
+| Downloadable caches, including `game_media` artwork and achievements | `$XDG_CACHE_HOME/distill` | `~/.cache/distill` |
 
 Only absolute XDG overrides are accepted. `DISTILL_PORTABLE=1` keeps the existing app-folder layout instead.
 Tools stay in the existing data directory's `tools/` folder. Explicit and app-relative tool paths retain their
 meaning. Startup copies only the existing allowlisted legacy settings and state files; it never removes the
-source or overwrites an existing destination. Credentials, tool folders, installed games and queues are not migrated.
+source or overwrites an existing destination. Tool folders, installed games and queues are not migrated.
 There is no separate `~/.local/share/Distill` fallback for read-only bundles.
+
+Credentials use the separate unified key/login store. On its first read, `distill_apikeys.json` and `distill_logins.json`
+sources in the config directory are folded into `distill_keys.json`, with existing entries taking priority and
+custom logins merged by host. App-folder credentials (including `distill_keys.json`) are considered after XDG
+legacy entries; app-folder originals are always preserved. One-shot finalization records all existing sources inside
+the sealed document after atomic publication, syncing and verification; only verified, imported same-directory files
+may then be removed. Finalization persists even after all credentials are forgotten, preventing re-import.
+Unreadable legacy files are left untouched, reported, and never imported later. An unreadable unified store blocks
+fallback imports, and the current unified file is never replaced while unreadable. Failed publication retains all
+originals and retries only on the next start.
+The general startup migration does not copy credentials.
+
+A persistent, owner-only sibling lock file serializes credential migration and updates across processes. Lock
+acquisition has a bounded wait and fails without writing. Credential reads accept only non-symlink regular files
+up to 1 MiB; FIFOs, devices, directories and oversized files are left untouched and reported as unreadable.
+Multiple Distill instances or other writers editing the same credentials are not synchronized; the last save wins.
+On Windows and in portable mode all three names refer to files beside the app; the same-directory fold-in applies.
+The unified file uses the existing Windows DPAPI/system-keyring sealing helper and owner-only permissions
+(plain text where encryption is unavailable).
 
 ## Linux features
 

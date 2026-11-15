@@ -12,6 +12,7 @@ from .assets import asset
 
 PATHS: dict[str, str] = {
     "search": '<circle cx="11" cy="11" r="7.5"/><path d="M21 21l-4.6-4.6"/>',
+    "sidebar": '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/>',
     "folder": '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     "folder-open": '<path d="M3 18V6a2 2 0 0 1 2-2h4l2 2.5h6a2 2 0 0 1 2 2V9"/>'
                    '<path d="M3 18l2.4-7.2A2 2 0 0 1 7.3 9.5H21a1 1 0 0 1 .95 1.3L19.7 17.6A2 2 0 0 1 17.8 19H4a1 1 0 0 1-1-1z"/>',
@@ -40,6 +41,7 @@ PATHS: dict[str, str] = {
     "chevron-up": '<path d="M6 15l6-6 6 6"/>',
     "chevron-right": '<path d="M9 6l6 6-6 6"/>',
     "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    "calendar": '<rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
     "list": '<path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',
     # media transport: solid shapes use the placeholder @c, which svg_bytes swaps for the colour asked for
     "play": '<path d=\"M8 5l11 7-11 7z\" fill=\"@c\"/>',
@@ -56,6 +58,12 @@ PATHS: dict[str, str] = {
     "shield-check": '<path d="M12 3l8 3v5.5c0 4.6-3.3 8.1-8 9.5-4.7-1.4-8-4.9-8-9.5V6z"/><path d="M8.8 12l2.3 2.3 4.2-4.6"/>',
     "external": '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>',
     "branch": '<circle cx="6" cy="5.5" r="2.3"/><circle cx="6" cy="18.5" r="2.3"/><circle cx="18" cy="9" r="2.3"/><path d="M6 8v8M18 11.3c0 3.7-6 2.7-11 5"/>',
+    "image": '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="1.8"/><path d="M21 15.5l-5-5L5.5 21"/>',
+    "upload": '<path d="M12 15.5V4M7.5 8.5L12 4l4.5 4.5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
+    "trash": '<path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4h6v3"/>',
+    "close": '<path d="M6 6l12 12M18 6L6 18"/>',
+    "check": '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+    "edit": '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
     "settings": '<circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7'
                 'M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/>',
 }
@@ -67,6 +75,7 @@ BY_TITLE = (
     ("link", "link"), ("file", "file"),
     ("games", "gamepad"), ("soundtrack", "music"), ("music", "music"), ("package", "cube"), ("archive", "archive"),
     ("playstation", "playstation"), ("junk", "brush"), ("platform", "layout"), ("report", "chart"), ("disc", "disc"), ("setting", "settings"),
+    ("update", "branch"),
 )
 
 

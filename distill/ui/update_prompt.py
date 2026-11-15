@@ -5,10 +5,11 @@ import threading
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 from .. import updater
 from ..constants import APP_NAME, APP_VERSION
+from . import msgbox
 from .update_screen import UpdateScreen
 
 
@@ -32,31 +33,24 @@ class UpdatePromptMixin:
         threading.Thread(target=lambda: self._upd.found.emit(updater.check()), daemon=True).start()
 
     def _update_offer(self, update) -> None:
-        if update is None or self._p_data.get("skip_update") == update.tag or getattr(self, "is_processing", False):
+        if update is None or self._p_data.get("skip_update") == update.tag or getattr(self, "is_processing", False) or getattr(self, "dl_runner", None) is not None:
             return
         can_install = bool(update.asset_url)
-        box = QMessageBox(self)
-        box.setWindowTitle("Update available")
-        box.setText(f"<b>{APP_NAME} {update.tag}</b> is available (you have {APP_VERSION}).")
-        box.setInformativeText("Install it now? Distill restarts when it is done; your settings and tools are kept."
-                               if can_install else "Open the download page?")
-        if update.notes.strip():
-            box.setDetailedText(update.notes.strip())
-        yes = box.addButton("Update now" if can_install else "Open page", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Not now", QMessageBox.ButtonRole.RejectRole)
-        skip = box.addButton("Skip this version", QMessageBox.ButtonRole.DestructiveRole)
-        box.setDefaultButton(yes)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is skip:
+        choice, _tick = msgbox.ask(
+            self, "info", "Update available", f"<b>{APP_NAME} {update.tag}</b> is available (you have {APP_VERSION}).",
+            [("Update now" if can_install else "Open page", "accept"), ("Not now", "normal"), ("Skip this version", "destructive")],
+            default=0, escape=1,
+            informative=("Install it now? Distill restarts when it is done; your settings and tools are kept." if can_install else "Open the download page?"),
+            details=update.notes.strip(), markdown=True, details_open=True, details_label="release notes")  # the GitHub release text, drawn as Markdown
+        if choice == 2:
             self._p_data["skip_update"] = update.tag
             self._settings_save()
-        elif clicked is yes:
+        elif choice == 0:
             self._update_install(update) if can_install else QDesktopServices.openUrl(QUrl(update.page))
 
     def _update_install(self, update) -> None:
-        if getattr(self, "is_processing", False):
-            return
+        if getattr(self, "is_processing", False) or getattr(self, "dl_runner", None) is not None:
+            return  # the update restarts the app, which would cut a running download short
         screen = UpdateScreen(self, f"{APP_NAME} {update.tag}")
         cancelled = threading.Event()
         screen.cancelled.connect(cancelled.set)
@@ -74,7 +68,7 @@ class UpdatePromptMixin:
 
         def fail(message: str) -> None:
             screen.dismiss()
-            QMessageBox.warning(self, "Update failed", f"{message}\n\nYou can download it by hand:\n{update.page}")
+            msgbox.warning(self, "Update failed", f"{message}\n\nYou can download it by hand:\n{update.page}")
 
         def on_done(result) -> None:
             self._upd.progress.disconnect(screen.set_progress)

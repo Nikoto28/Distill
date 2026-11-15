@@ -88,7 +88,8 @@ _MIGRATION_LIMIT = 8 * 1024 * 1024
 def migrate_legacy() -> list[dict[str, str]]:
     """Copy only safe, allowlisted legacy files; existing destinations always win.
 
-    Login data, rules, queues, logs, caches, tools and installed games are deferred.
+    Credentials are handled separately by apikeys' verified unified-store migration.
+    Rules, queues, logs, caches, tools and installed games are deferred.
     Failures are returned per file and never abort startup or remove a source.
     """
     if layout() != "xdg":

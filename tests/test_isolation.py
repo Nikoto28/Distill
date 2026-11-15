@@ -64,8 +64,8 @@ class IsolationTests(unittest.TestCase):
                 self.assertIn(SANDBOX, path.parents)
 
     def test_every_moved_constant_is_inside_the_sandbox(self):
-        moved = {"persist": ("SETTINGS_FILE",), "downloads": ("LOGIN_FILE", "SESSION_FILE"),
-                 "apikeys": ("FILE",), "netrules": ("RULES_FILE",), "ytdlp": ("SETTINGS_FILE",),
+        moved = {"persist": ("SETTINGS_FILE",), "downloads": ("SESSION_FILE",),
+                 "apikeys": ("FILE", "LEGACY_KEYS_FILE", "LEGACY_LOGINS_FILE"), "netrules": ("RULES_FILE",), "ytdlp": ("SETTINGS_FILE",),
                  "torrents": ("TORRENT_FILE", "TORRENT_DIR"), "torrent_runners": ("TORRENT_DIR",),
                  "soundtracks": ("PREFS_FILE", "SAVES_FILE", "CACHE_FILE"),
                  "crashlog": ("CRASH_FILE",), "motion": ("MOTION_LOG",), "title_dialog": ("ICON_CACHE",),

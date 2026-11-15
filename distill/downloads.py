@@ -23,8 +23,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
 
-from . import debrid, secretstore, ytdlp
-from . import paths
+from . import apikeys, debrid, ftpclient, paths, ytdlp
 from .constants import APP_NAME, APP_VERSION, SUBPROCESS_FLAGS
 from .models import fmt_size
 from .netrules import GATE, PAUSED, RULES, THROTTLE, host_of
@@ -87,9 +86,6 @@ class RemoteFile:
 
 
 SESSION_FILE = paths.state_dir() / "distill_download_session.json"  # the Download tab's list, ticks, filter and options
-
-
-LOGIN_FILE = paths.config_dir() / "distill_logins.json"  # only written when "Remember" is ticked in the Logins window
 
 
 # Sites with their own sign-in: key -> (name, hostnames, ((field, label, hidden), ...), where to find the key, required)
@@ -165,27 +161,26 @@ def auth_headers(url: str) -> dict[str, str]:
             return {"Authorization": f"Bearer {cred['secret']}"}
         if cred.get("kind") == CUSTOM_KINDS[2]:
             return {"Cookie": cred["secret"]}
-        token = base64.b64encode(f"{cred.get('user', '')}:{cred['secret']}".encode("utf-8")).decode("ascii")
+        token = base64.b64encode(f"{cred.get('user', '')}:{cred['secret']}".encode()).decode("ascii")
         return {"Authorization": f"Basic {token}"}
     return {}  # 1fichier: the API key is only used against its own API, never on file downloads
 
 
+def ftp_creds(url: str) -> tuple[str, str] | None:
+    """A saved login (API keys > Downloads > other site, user name and password) for this FTP address; None = the address's own, or anonymous."""
+    cred = login_for(url)
+    if cred and cred.get("user") and site_for(url).startswith("custom:") and cred.get("kind") not in CUSTOM_KINDS[1:]:
+        return cred["user"], cred["secret"]
+    return None
+
+
 def load_logins() -> bool:
-    """Read remembered logins. True if anything was remembered."""
+    """Read remembered logins from the keys file (apikeys.py). True if anything was remembered."""
     global LOGIN_PROBLEM
     LOGINS.clear()
     LOGINS["custom"] = []
-    LOGIN_PROBLEM = ""
-    try:
-        data = json.loads(LOGIN_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and data.get("v") == 2:  # sealed: see secretstore.py; older files are plain and still load
-            data = json.loads(secretstore.unseal(data).decode("utf-8"))
-    except secretstore.SealError as exc:
-        LOGIN_PROBLEM, data = str(exc), {}
-    except (OSError, ValueError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
+    data = apikeys.logins()
+    LOGIN_PROBLEM = apikeys.problem()
     for key in LOGIN_SITES:
         if isinstance(data.get(key), dict):
             LOGINS[key] = {str(k): str(v) for k, v in data[key].items()}
@@ -196,19 +191,18 @@ def load_logins() -> bool:
     return any(LOGINS.get(k) for k in (*LOGIN_SITES, "custom"))
 
 
-def save_logins(remember: bool) -> None:
-    """Keep the logins in the runtime config directory only while 'Remember' is ticked."""
-    try:
-        if remember and any(LOGINS.get(k) for k in (*LOGIN_SITES, "custom")):
-            sealed = secretstore.seal(json.dumps(LOGINS).encode("utf-8"))  # plain text only where nothing better exists
-            paths.ensure_parent(LOGIN_FILE)
-            LOGIN_FILE.write_text(json.dumps(sealed), encoding="utf-8")
-            with contextlib.suppress(OSError):
-                os.chmod(LOGIN_FILE, 0o600)  # owner-only where the OS supports it
-        else:
-            LOGIN_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
+def save_logins(remember: bool) -> bool:
+    """Keep the logins in the keys file (sealed, see secretstore.py) only while 'Remember' is ticked; the API keys stay either way."""
+    global LOGIN_PROBLEM
+    keep = remember and any(LOGINS.get(k) for k in (*LOGIN_SITES, "custom"))
+    if not apikeys.save_logins(LOGINS if keep else None):
+        load_logins()
+        return False
+    custom = LOGINS.get("custom")
+    if isinstance(custom, list):
+        custom.sort(key=lambda entry: -len(entry["host"]))
+    LOGIN_PROBLEM = apikeys.problem()
+    return True
 
 
 def logins_missing(urls: list[str], required_only: bool = False) -> list[str]:
@@ -231,8 +225,10 @@ class _KeepKeysOnSite(urllib.request.HTTPRedirectHandler):
             def where(u: str) -> str:
                 return site_for(u) or (urllib.parse.urlsplit(u).hostname or "").lower()
             if where(newurl) != where(req.full_url):
-                for name in ("Authorization", "Cookie"):
-                    new.remove_header(name)
+                for name in ("Authorization", "Cookie", *RULES.private_header_names(req.full_url)):
+                    new.remove_header(name.capitalize())  # urllib stores header names capitalised
+            for name, value in RULES.headers_for(newurl).items():  # the site it lands on may have rules of its own
+                new.add_header(name, value)
         return new
 
 
@@ -253,7 +249,7 @@ def opener_for(url: str) -> urllib.request.OpenerDirector:
 
 
 def http_open(url: str, headers: dict[str, str] | None = None, method: str = "GET", timeout: float = 30):
-    hdrs = {"User-Agent": USER_AGENT, **(headers or {}), **auth_headers(url)}
+    hdrs = {"User-Agent": USER_AGENT, **RULES.headers_for(url), **(headers or {}), **auth_headers(url)}
     return opener_for(url).open(urllib.request.Request(url, headers=hdrs, method=method), timeout=timeout)
 
 
@@ -268,10 +264,10 @@ def describe_error(exc: BaseException) -> str:
     if isinstance(exc, urllib.error.HTTPError):
         url = getattr(exc, "url", "") or ""
         name, have = _site_name(url), login_for(url) is not None
-        hint = {401: f"login rejected - check your {name} login (Logins...)" if have else
-                f"needs a login - add one for {name} under Logins...",
+        hint = {401: f"login rejected - check your {name} login (Settings > API keys > Downloads)" if have else
+                f"needs a login - add one for {name} under Settings > API keys > Downloads",
                 403: "access denied - this account may not have access to it" if have else
-                f"access denied - it may need a {name} login (Logins...)",
+                f"access denied - it may need a {name} login (Settings > API keys > Downloads)",
                 404: "not found", 410: "gone",
                 429: "rate limited - try fewer parallel downloads"}.get(exc.code, "")
         return f"HTTP {exc.code}" + (f" - {hint}" if hint else "")
@@ -380,7 +376,7 @@ def list_archive_item(identifier: str, subpath: str = "") -> list[RemoteFile]:
         if str((data.get("metadata") or {}).get("access-restricted-item", "")).lower() == "true":
             raise LinkError(f"{identifier} is access-restricted. " + (
                 "Your account doesn't appear to have access to its files." if login_for(ARCHIVE_URL) else
-                "Add your archive.org keys under Logins... and fetch again."))
+                "Add your archive.org keys under Settings > API keys > Downloads and fetch again."))
         raise LinkError(f"{identifier}: no downloadable files found (item missing, empty or not public)")
     meta: dict[str, dict] = {f["name"]: f for f in data["files"] if f.get("name")}
 
@@ -459,7 +455,7 @@ FICHIER_API = "https://api.1fichier.com/v1"
 def _fichier_call(endpoint: str, payload: dict) -> dict:
     key = (LOGINS.get("1fichier") or {}).get("apikey", "")
     if not key:
-        raise LinkError("1fichier links need your API key - add it under Logins...")
+        raise LinkError("1fichier links need your API key - add it under Settings > API keys > Downloads.")
     req = urllib.request.Request(
         f"{FICHIER_API}/{endpoint}", data=json.dumps(payload).encode("utf-8"), method="POST",
         headers={"User-Agent": USER_AGENT, "Content-Type": "application/json", "Authorization": f"Bearer {key}"})
@@ -550,6 +546,7 @@ class DownloadSummary:
     bytes_received: int
     seconds: float
     stopped: int = 0  # files the person stopped one by one during the run
+    finished: tuple[Path, ...] = ()  # where the files that finished (or were already there) are, for the after-run actions
 
 
 class DownloadRunner:
@@ -848,6 +845,8 @@ class DownloadRunner:
 
     @staticmethod
     def _retryable(exc: BaseException) -> bool:
+        if isinstance(exc, ftpclient.FtpError):
+            return not exc.permanent  # a wrong login or a missing file will not get better on the second try
         if isinstance(exc, urllib.error.HTTPError):
             return exc.code in (408, 425, 429) or exc.code >= 500
         return isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException,
@@ -918,7 +917,10 @@ class DownloadRunner:
 
         resp = None
         try:
-            resp = http_open(direct_url(rf.url), {"Range": f"bytes={have}-"} if have else None)
+            if ftpclient.is_ftp(rf.url):  # FTP: one connection, resumed with REST; the stream reads like an HTTP response
+                resp = ftpclient.FtpStream(rf.url, have, ftp_creds(rf.url))
+            else:
+                resp = http_open(direct_url(rf.url), {"Range": f"bytes={have}-"} if have else None)
         except urllib.error.HTTPError as exc:
             if exc.code != 416 or not have:
                 raise
@@ -1300,7 +1302,8 @@ class DownloadRunner:
             if self.post_action:
                 self._post_process()
             summary = DownloadSummary(len(self.jobs), self.done, self.skipped, tuple(self.failures),
-                                      self.bytes_received, took, self.stopped)
+                                      self.bytes_received, took, self.stopped,
+                                      tuple(p for p in self.completed_paths if p.exists()))  # (an unpacked-and-deleted archive is gone)
             speed = f", {fmt_size(int(self.bytes_received / took))}/s average" if took > 1 and self.bytes_received else ""
             lost = f", {self.stopped} stopped" if self.stopped else ""
             self._emit(("log", f"--- Download complete: {self.done} downloaded ({fmt_size(self.bytes_received)}"
