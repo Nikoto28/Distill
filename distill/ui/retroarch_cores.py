@@ -22,7 +22,7 @@ from .widgets import accent_button, Card, fit_columns, hint
 CORE_FILTERS = ("All cores", "Installed", "Updates available", "Not installed", "For my library", "Recommended")
 STATUS_TEXT = {"missing": "", "current": "Installed", "update": "Update available", "unknown": "Installed", "local": "Installed (not on server)"}
 RETROARCH = "retroarch"
-CORES_HELP = "Tick the cores you want installed, untick the ones you don't, then press Apply.  ★ marks our pick for a system: a judgment call, not a benchmark."
+CORES_HELP = "Select the cores you want installed, deselect the ones you don't, then press Apply.  ★ marks our pick for a system: a judgment call, not a benchmark."
 
 
 class CoresMixin:

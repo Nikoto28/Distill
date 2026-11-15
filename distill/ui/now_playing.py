@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QSizePolicy, QSlider, QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import icons, motion, scratchmath
+from ..mediaqueue import REPEAT_OFF, REPEAT_ONE
+from . import framemath, icons, motion, scratchmath
 from .frameless import FramelessDialog
 from .theme import T
 
@@ -60,8 +61,8 @@ class WavySlider(QSlider):
         self._phase = 0.0
         self._amp = 0.0  # the wave's height now, eased between 0 (flat) and 1
         self._moving = False
-        self._timer = QTimer(self)
-        self._timer.setInterval(33)
+        self._clock = motion.FrameClock()
+        self._timer = motion.frame_timer(self)
         self._timer.timeout.connect(self._tick)
 
     def set_moving(self, on: bool) -> None:
@@ -73,13 +74,21 @@ class WavySlider(QSlider):
             self.update()
             return
         if self.isVisible() and (on or self._amp > 0.02) and not self._timer.isActive():
-            self._timer.start()
+            self._clock.reset()
+            self._timer.start(motion.frame_ms(self))
+
+    AMP_RATE = framemath.rate_per_frame(0.14, 30)  # how fast it rises and settles: what 14 % of the way a frame was at 30 fps
+    PHASE_RATE = 0.13 * 30  # radians a second the ripple travels: what 0.13 a frame was at 30 fps
 
     def _tick(self) -> None:
+        self.advance(self._clock.dt())
+
+    def advance(self, dt: float) -> None:
+        """Move the wave on by `dt` seconds."""
         goal = 1.0 if self._moving else 0.0
-        self._amp += (goal - self._amp) * 0.14
+        self._amp = framemath.follow(self._amp, goal, self.AMP_RATE, dt)
         if self._moving:
-            self._phase = (self._phase + 0.13) % (2 * math.pi)
+            self._phase = (self._phase + self.PHASE_RATE * dt) % (2 * math.pi)
         elif self._amp < 0.02:
             self._amp = 0.0
             self._timer.stop()
@@ -193,8 +202,7 @@ class CdArt(QWidget):
         self._omega = 0.0  # degrees per second now
         self._angle = 0.0
         self._last = 0.0
-        self._timer = QTimer(self)
-        self._timer.setInterval(33)
+        self._timer = motion.frame_timer(self)
         self._timer.timeout.connect(self._tick)
         self._held = False  # in a hand: it stays put until the hand lets go (and turns only as far as the hand does)
         self._press: QPointF | None = None  # where the button went down on it (None: not down)
@@ -241,7 +249,7 @@ class CdArt(QWidget):
     def _run_timer(self) -> None:
         if self.isVisible() and motion.on() and not self._held and (self._spinning or self._omega > 0.5) and not self._timer.isActive():
             self._last = time.monotonic()
-            self._timer.start()
+            self._timer.start(motion.frame_ms(self))
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -422,6 +430,10 @@ class NowPlaying(QWidget):
     stopped = Signal()
     seekTo = Signal(int)  # milliseconds
     opened = Signal()  # the title was clicked: take me to where this came from
+    likeToggled = Signal()  # the heart: add this track to (or take it out of) the favourites
+    shuffleToggled = Signal(bool)  # the new state
+    repeatCycled = Signal()  # off -> all -> one -> off
+    queueOpened = Signal()  # take me to the queue
     volumeChanged = Signal(float, bool)  # 0..1 on the slider, and whether it is muted
     scratchStarted = Signal()  # the disc was held (or dragged): stop the music
     scratched = Signal(float, float)  # degrees it has been turned since, and how fast it is turning now
@@ -485,6 +497,20 @@ class NowPlaying(QWidget):
         row.addWidget(self._stop)
         lay.addLayout(row)
 
+        modes = QHBoxLayout()  # like, shuffle, repeat ... queue
+        modes.setSpacing(2)
+        self._liked, self._shuffle_on, self._repeat = False, False, REPEAT_OFF
+        self._like = self._button("heart", "Add to your favourites", self.likeToggled)
+        self._shuffle = self._button("shuffle", "Shuffle", None)
+        self._shuffle.clicked.connect(lambda _c=False: self.shuffleToggled.emit(not self._shuffle_on))
+        self._repeat_btn = self._button("repeat", "Repeat", self.repeatCycled)
+        self._queue = self._button("list", "Open the queue", self.queueOpened)
+        for b in (self._like, self._shuffle, self._repeat_btn):
+            modes.addWidget(b)
+        modes.addStretch(1)
+        modes.addWidget(self._queue)
+        lay.addLayout(modes)
+
         vol = QHBoxLayout()  # volume: a mute button and a slider
         vol.setSpacing(2)
         self._mute = QToolButton()
@@ -503,6 +529,7 @@ class NowPlaying(QWidget):
         vol.addWidget(self._volume, 1)
         lay.addLayout(vol)
         self._refresh_mute_icon()
+        self._refresh_modes()
         self._duration = 0
         self._playing = True
 
@@ -513,7 +540,8 @@ class NowPlaying(QWidget):
         b.setAccessibleName(tip)  # no hover tooltip; screen readers still get the name
         b.setAutoRaise(True)
         b.setFixedSize(28, 26)
-        b.clicked.connect(lambda _c=False: signal.emit())
+        if signal is not None:
+            b.clicked.connect(lambda _c=False: signal.emit())
         return b
 
     def _icon(self, name: str):
@@ -528,7 +556,26 @@ class NowPlaying(QWidget):
             button.setIcon(self._icon(name))
         self._play.setIcon(self._icon("pause" if self._playing else "play"))
         self._refresh_mute_icon()
+        self._refresh_modes()
         self._art.update()  # the blank disc and the rim take the theme's colours
+
+    # ---- like, shuffle, repeat ------------------------------------------------------------------
+    def set_controls(self, liked: bool, shuffle: bool, repeat: str) -> None:
+        """Show whether the playing track is liked and whether shuffle / repeat are on (without announcing a change)."""
+        self._liked, self._shuffle_on, self._repeat = liked, shuffle, repeat
+        self._refresh_modes()
+
+    def _refresh_modes(self) -> None:
+        """The heart goes pink when the track is liked; shuffle and repeat go accent-coloured while they are on."""
+        def paint(button: QToolButton, name: str, lit: bool, colour: QColor) -> None:
+            button.setIcon(icons.button_icon(name, colour if lit else T.fg, colour if lit else T.title, 18))
+        paint(self._like, "heart-filled" if self._liked else "heart", self._liked, T.group_dl)
+        paint(self._shuffle, "shuffle", self._shuffle_on, T.accent_text)
+        paint(self._repeat_btn, "repeat-one" if self._repeat == REPEAT_ONE else "repeat", self._repeat != REPEAT_OFF, T.accent_text)
+        self._queue.setIcon(self._icon("list"))
+        self._like.setAccessibleName("Remove from your favourites" if self._liked else "Add to your favourites")
+        self._shuffle.setAccessibleName("Shuffle: on" if self._shuffle_on else "Shuffle: off")
+        self._repeat_btn.setAccessibleName({REPEAT_OFF: "Repeat: off", REPEAT_ONE: "Repeat: one"}.get(self._repeat, "Repeat: all"))
 
     # ---- volume -------------------------------------------------------------------------------
     def _volume_moved(self, *_args) -> None:

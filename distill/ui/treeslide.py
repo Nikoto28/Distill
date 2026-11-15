@@ -1,5 +1,5 @@
 """Open and close animation for the rows under a top-level item of a QTreeWidget (the tracks under a game in the
-Soundtrack Grabber, the details under a finding on the Organize pages).
+Distill Resonance, the details under a finding on the Organize pages).
 
 Opening: the tracks are written in from the top. Each row opens a moment after the one above it, and its text is
 swept in from left to right, a little behind the height. Closing: the rows fold up together and fade as they get

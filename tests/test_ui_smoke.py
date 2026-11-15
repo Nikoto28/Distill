@@ -118,6 +118,35 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
                 win._rc_back()
                 self.assertEqual(win.rc_views.currentIndex(), 0)
 
+    def test_recomps_page_chooses_a_folder_finds_installs_and_links_one_by_hand(self):
+        import tempfile
+        from pathlib import Path
+
+        from distill import recomps as rc
+
+        td = tempfile.TemporaryDirectory(prefix="distill_rc_ui_")
+        self.addCleanup(td.cleanup)
+        lib = Path(td.name) / "lib"
+        (lib / "Ship of Harkinian").mkdir(parents=True)
+        (lib / "Ship of Harkinian" / "soh.exe").write_bytes(b"MZ")
+        with mock.patch.object(rc, "ROOT", Path(td.name)), mock.patch.object(rc, "platform_key", lambda: "windows"):
+            win = self.make_window()
+            self.addCleanup(win.close)
+            with mock.patch("threading.Thread.start", lambda self: None):
+                win._nav_click("recomps")
+                self.assertEqual(win.rc_root_edit.text(), "")
+                rc.set_recomps_root(win.rc_store, lib)
+                win.rc_root_edit.setText(str(lib))
+                found = rc.scan_all(win.rc_store, win._rc_catalog, "windows")
+                win._apply_events([("recomp_scan", found, False, "")])
+                inst = win.rc_store.installed("ship-of-harkinian")
+                self.assertIsNotNone(inst)
+                self.assertEqual(inst.linked, "folder")
+                win._rc_show_detail("ship-of-harkinian")
+                self.assertEqual(win.rcd_remove.text(), "Remove")  # a linked copy is only forgotten
+                self.assertTrue(win.rcd_locate.menu() is not None)
+                self.assertTrue((lib / "Ship of Harkinian" / "soh.exe").exists())
+
     def test_emulators_page_lists_groups_links_installs_and_filters(self):
         import tempfile
         from pathlib import Path
@@ -327,6 +356,311 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
             win._st_on_resolved(token, [(0, [direct], "")])
         self.assertEqual(started, [[0]])
         self.assertEqual(win.dl_files[0].url, "https://cdn.example/01.mp3")
+
+    def test_home_tab_fills_its_rows_and_opens_albums_on_the_search_tab(self):
+        from distill import soundtracks as st
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        self.assertEqual(win.media_tabs.tabText(0), "Home")
+        albums = [st.Album("khinsider", f"a{i}", f"Album {i}", "PC \u00b7 2020", 1.0) for i in range(3)]
+        win._st_on_home("top40", albums, "")
+        strip = win._home_strips["top40"]
+        self.assertEqual(len(strip.tiles()), 3)
+        win._st_on_home("new", [], "khinsider is behind a Cloudflare check")
+        self.assertIn("Cloudflare", win._home_strips["new"].note.text())
+        started = []
+        with mock.patch("threading.Thread.start", lambda self: started.append(self)):
+            strip.tiles()[1].opened.emit()
+        self.assertEqual(win.media_tabs.tabText(win.media_tabs.currentIndex()), "Search")
+        self.assertEqual([r.album.title for r in win._st_rows], ["Album 1"])
+        self.assertEqual(len(started), 1)  # its tracks are being listed
+
+    def test_durations_show_in_track_rows_and_the_album_line(self):
+        from distill import soundtracks as st
+        from distill.downloads import RemoteFile
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win.st_search.setText("x")
+        with mock.patch("threading.Thread.start", lambda self: None):
+            win._st_search()
+        album = st.Album("khinsider", "x", "X", "", 1.0)
+        win._st_on_found(0, st.GameResult(st.GameRequest("X"), [album]))
+        files = [RemoteFile("X/soundtrack/01 - A.mp3", "https://x/1", 5, seconds=320),
+                 RemoteFile("X/soundtrack/02 - B.mp3", "https://x/2", 5, seconds=3400)]
+        win._st_on_tracks(0, album, files, "")
+        row = win._st_rows[0]
+        self.assertEqual([i.duration for i in row.view._infos], ["5:20", "56:40"])
+        self.assertIn("1 h 1 min", row.view.meta.text())
+        self.assertNotIn("KHInsider", row.view.meta.text())  # (the source is a chip of its own, so the facts line is not cut off)
+        self.assertEqual(row.view._source_chip.text(), "KHInsider")  # (KHInsider has a clickable credit chip; the plain label is for sources without one)
+        self.assertTrue(row.view.source.isHidden())
+
+    def test_media_page_has_tabs_and_the_library_lists_starred_albums(self):
+        from distill import soundtracks as st
+        from distill.downloads import RemoteFile
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        tabs = [win.media_tabs.tabText(i) for i in range(win.media_tabs.count())]
+        self.assertEqual(tabs, ["Home", "Search", "Browse", "Library", "Playlists", "Queue", "Settings"])
+        win.st_search.setText("celeste")
+        with mock.patch("threading.Thread.start", lambda self: None):
+            win._st_search()
+        album = st.Album("khinsider", "celeste", "Celeste", "PC \u00b7 2018", 1.0)
+        win._st_on_found(0, st.GameResult(st.GameRequest("Celeste"), [album]))
+        win._st_on_tracks(0, album, [RemoteFile("Celeste/soundtrack/01 - A.mp3", "https://x/1", 5)], "")
+        self.assertEqual(win.lib_list.count() - 2, 0)  # empty: just the message and the stretch
+        win._st_toggle_library(win._st_rows[0])
+        self.assertTrue(win.media_store.in_library(album))
+        self.assertEqual(len(win._lib_widgets), 1)
+        self.assertEqual(win._lib_widgets[0][1].title.text(), "Celeste")
+        win.lib_filter.setText("zzz")
+        self.assertEqual(len(win._lib_widgets), 0)
+        win.lib_filter.setText("")
+        win._lib_remove(album)
+        self.assertFalse(win.media_store.in_library(album))
+        self.assertEqual(len(win._lib_widgets), 0)
+
+    def test_disk_allocations_in_settings_are_stored_and_enforced(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win.snap_spin.setValue(7)
+        win._media_set_snapshot_limit()
+        self.assertEqual(win.media_store.snapshot_limit(), 7 * 1024 * 1024)
+        self.assertEqual(win.cache_spin.value(), 0)  # the audio cache starts off
+        win.cache_spin.setValue(300)
+        win._media_set_cache_limit()
+        self.assertEqual(win.media_store.audio_cache_limit(), 300 * 1024 * 1024)
+        self.assertIn("used", win.cache_use.text())
+        win.cache_spin.setValue(0)
+        win._media_set_cache_limit()
+        self.assertEqual(win.cache_use.text(), "not caching")
+
+    def test_queue_tab_shows_up_next_and_edits_it(self):
+        from distill.mediaqueue import QueueItem
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        tabs = [win.media_tabs.tabText(i) for i in range(win.media_tabs.count())]
+        self.assertIn("Queue", tabs)
+        items = [QueueItem(f"t{i}", "Album", f"u{i}", "", "khinsider", "x", i) for i in range(4)]
+        win.pq.set(items, 0)
+        win._queue_refresh()
+        self.assertEqual(len(win._q_widgets), 6)  # "Now playing" + 1 row, "Up next" + 3 rows
+        win._queue_remove(3)
+        self.assertEqual([i.title for i in win.pq.items], ["t0", "t1", "t2"])
+        win._queue_shift(2, -1)  # the up button on t2
+        self.assertEqual([i.title for i in win.pq.items], ["t0", "t2", "t1"])
+        self.assertEqual(win.pq.current().title, "t0")
+        win._queue_cycle_repeat()
+        self.assertEqual(win.q_repeat.text(), "Repeat: all")
+        win._st_save_queue()
+        from distill.mediaqueue import PlayQueue
+        again = PlayQueue()
+        import json
+        again.restore(json.loads(win.media_store.setting("queue_state")))
+        self.assertEqual([i.title for i in again.items], ["t0", "t2", "t1"])
+
+    def test_queue_rows_can_be_dropped_into_a_new_place(self):
+        from distill.mediaqueue import QueueItem
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win.pq.set([QueueItem(f"t{i}", "A", f"u{i}", "", "khinsider", "x", i) for i in range(4)], 0)
+        win._queue_refresh()
+        win._queue_drop(3, 0)  # the last one to the front of "up next"
+        self.assertEqual([win.pq.items[i].title for i in win.pq.upcoming()], ["t3", "t1", "t2"])
+        win._queue_shift(win.pq.upcoming()[0], 1)  # nudge it one place down
+        self.assertEqual([win.pq.items[i].title for i in win.pq.upcoming()], ["t1", "t3", "t2"])
+        win._queue_drop(win.pq.upcoming()[0], 3)  # drop below the last row
+        self.assertEqual([win.pq.items[i].title for i in win.pq.upcoming()], ["t3", "t2", "t1"])
+
+    def test_favourites_playlists_and_history(self):
+        from distill import soundtracks as st
+        from distill.downloads import RemoteFile
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        self.assertIn("Playlists", [win.media_tabs.tabText(i) for i in range(win.media_tabs.count())])
+        win.st_search.setText("celeste")
+        with mock.patch("threading.Thread.start", lambda self: None):
+            win._st_search()
+        album = st.Album("khinsider", "celeste", "Celeste", "PC \u00b7 2018", 1.0)
+        win._st_on_found(0, st.GameResult(st.GameRequest("Celeste"), [album]))
+        files = [RemoteFile("Celeste/soundtrack/01 - A.mp3", "https://x/1", 5),
+                 RemoteFile("Celeste/soundtrack/02 - B.mp3", "https://x/2", 5)]
+        win._st_on_tracks(0, album, files, "")
+        row = win._st_rows[0]
+        win._pl_files[("khinsider", "celeste")] = files  # as if listed already: no network in a test
+        win._st_toggle_favourite(row, 1)
+        self.assertEqual(win.media_store.favourite_positions(album), {1})
+        self.assertTrue(row.view._infos[1].liked)
+        win._pl_reload_picker()
+        self.assertEqual(win._pl_current(), "favourites")
+        self.assertEqual(len(win._pl_widgets), 1)
+        pid = win.media_store.create_playlist("Mix")
+        win._pl_add(row, [0, 1], pid)
+        win.pl_pick.setCurrentIndex(win.pl_pick.findData(pid))
+        win._pl_refresh()
+        self.assertEqual(len(win._pl_widgets), 2)
+        win._pl_move(0, 1)
+        self.assertEqual([p for _i, _a, p in win.media_store.playlist_items(pid)], [1, 0])
+        played = []
+        with mock.patch.object(type(win), "_st_play_index", lambda self, i: played.append(i)):
+            win._pl_play(0)
+        self.assertEqual(win.pq.current().title, "B")
+        self.assertEqual(played, [win.pq.current_index])
+        win.pq.set([win.pq.items[0]], 0)
+        win._st_log_play()
+        self.assertEqual([a.title for a in win.media_store.recent_albums()], ["Celeste"])
+        win._st_log_play()  # once per play
+        self.assertEqual(win.media_store.library(), [])  # a play does not add to the library
+        win._st_clear_history()
+        self.assertEqual(win.media_store.recent_albums(), [])
+
+    def test_game_soundtrack_button_ranks_by_platform_and_remembers_the_choice(self):
+        from distill import soundtracks as st
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        started = []
+        with mock.patch("threading.Thread.start", lambda self: started.append(self)):
+            win._st_search_game("g1", "Persona 5", "Sony PlayStation 4", "2016")
+        self.assertEqual(win._st_game_ctx, ("g1", "Persona 5", "Sony PlayStation 4", "2016"))
+        self.assertEqual(win.st_search.text(), "Persona 5")
+        pc = st.Album("khinsider", "pc", "Persona 5", "PC \u00b7 2017", 0.95)
+        ps4 = st.Album("khinsider", "ps4", "Persona 5", "PlayStation 4 \u00b7 2016", 0.90)
+        self.assertEqual([a.ident for a in st.rank_for_game([pc, ps4], "Sony PlayStation 4", "2016")], ["ps4", "pc"])
+        win._st_on_found(0, st.GameResult(st.GameRequest("Persona 5"), [ps4, pc]))
+        row = win._st_rows[0]
+        win._st_use_for_game(row)
+        self.assertEqual(win.media_store.game_album("g1").ident, "ps4")
+        self.assertTrue(win._is_game_choice(ps4))
+        win._st_use_for_game(row)  # a second press forgets it
+        self.assertIsNone(win.media_store.game_album("g1"))
+
+    def test_saved_albums_join_the_library_with_badges_and_merge_with_streamed_ones(self):
+        from distill import soundtracks as st
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        local = st.Album("local", "/music/Celeste", "Celeste", "", 1.0)
+        win._st_on_local([(local, 12)])
+        self.assertEqual([w.badge.text() for _a, w in win._lib_widgets], ["Saved on disk"])
+        win.media_store.add_to_library(st.Album("khinsider", "celeste", "Celeste Original Soundtrack", "PC \u00b7 2018", 1.0))
+        win._lib_refresh()
+        self.assertEqual([w.badge.text() for _a, w in win._lib_widgets], ["Saved + streaming"])  # one row for both
+        win.media_store.add_to_library(st.Album("khinsider", "hades", "Hades", "PC \u00b7 2020", 1.0))
+        win._lib_refresh()
+        self.assertEqual(sorted(w.badge.text() for _a, w in win._lib_widgets), ["Saved + streaming", "Streaming"])
+        win._st_on_local([])  # the folder was deleted
+        self.assertEqual([w.badge.text() for _a, w in win._lib_widgets].count("Saved on disk"), 0)
+
+    def test_khinsider_is_credited_with_a_chip_that_says_where_things_come_from(self):
+        from distill.ui.sourcechips import has_chip, source_chip
+
+        chip = source_chip("khinsider")
+        self.assertEqual(chip.text(), "KHInsider")
+        self.assertIn("downloads.khinsider.com", chip.toolTip())
+        self.assertIn("album lists, covers, track lists", chip.toolTip())
+        self.assertEqual(source_chip("archive.org").text(), "archive.org")
+        self.assertIsNone(source_chip(st.LOCAL_SOURCE))  # files on this computer need no credit
+        self.assertTrue(has_chip("khinsider") and not has_chip(st.LOCAL_SOURCE))
+        win = self.make_window()
+        self.addCleanup(win.close)
+        album = st.Album("khinsider", "x", "X", "", 1.0)
+        row = win._st_add_album(album)
+        self.assertEqual(row.view._source_chip.text(), "KHInsider")
+        self.assertNotIn("KHInsider", row.view.meta.text())  # the chip says it, the line of facts does not repeat it
+        local = win._st_add_album(st.Album(st.LOCAL_SOURCE, "/music/G", "G", "", 1.0))
+        self.assertIsNone(local.view._source_chip)
+
+    def test_browse_tab_lists_a_platform_a_page_at_a_time(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        self.assertIn("Browse", [win.media_tabs.tabText(i) for i in range(win.media_tabs.count())])
+        win._st_on_browse("consoles", 0, [("nintendo-switch", "Switch", 1500), ("playstation-4", "PS4", 1900)], 1, "")
+        self.assertEqual(win.br_value.count(), 2)
+        self.assertEqual(win.br_value.currentIndex(), -1)  # nothing chosen until the person chooses
+        albums = [st.Album("khinsider", f"a{i}", f"Album {i}", "Switch \u00b7 2020", 1.0) for i in range(70)]
+        win._br_token = 5
+        win._st_on_browse("albums", 4, albums, (1, 1), "")  # an answer to an earlier choice: ignored
+        self.assertEqual(len(win._br_tiles), 0)
+        win._st_on_browse("albums", 5, albums, (1, 3), "")
+        self.assertEqual(len(win._br_tiles), 60)  # a step at a time
+        self.assertTrue(win.br_more.isVisible() or win.br_more.text().startswith("Show more"))
+        self.assertTrue(win.br_next.isEnabled() and not win.br_prev.isEnabled())
+        self.assertEqual(win.br_page_label.text(), "Page 1 of 3")
+        win._br_render(more=True)
+        self.assertEqual(len(win._br_tiles), 70)
+        win.br_mode.setCurrentIndex(1)  # Year
+        self.assertEqual(win.br_value.itemData(0), str(__import__("time").localtime().tm_year))
+
+    def test_covers_are_kept_on_disk_and_not_fetched_twice(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        calls = []
+
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n): return b"IMG" * 10
+
+        def fake(url, headers=None, timeout=30):
+            calls.append(url)
+            return Resp()
+
+        with mock.patch("distill.ui.soundtrack_page.http_open", fake):
+            win._st_art_worker("https://x/c.jpg")
+            win._st_art_worker("https://x/c.jpg")
+        self.assertEqual(len(calls), 1)  # the second came from the folder
+        self.assertEqual(win._st_covers.get("https://x/c.jpg"), b"IMG" * 10)
+
+    def test_backup_and_restore_buttons_round_trip_the_library(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win.media_store.add_to_library(st.Album("khinsider", "celeste", "Celeste", "PC \u00b7 2018", 1.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "backup.json")
+            with mock.patch("distill.ui.soundtrack_page.QFileDialog.getSaveFileName", return_value=(path, "")):
+                win._media_backup()
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            self.assertEqual(data["format"], "distill-media-backup")
+            win.media_store.remove_from_library(st.Album("khinsider", "celeste", "Celeste", "", 1.0))
+            self.assertEqual(win.media_store.library(), [])
+            with mock.patch("distill.ui.soundtrack_page.QFileDialog.getOpenFileName", return_value=(path, "")):
+                win._media_restore()
+            self.assertEqual([e.title for e in win.media_store.library()], ["Celeste"])
+            Path(path).write_text("not json", encoding="utf-8")
+            with mock.patch("distill.ui.soundtrack_page.QFileDialog.getOpenFileName", return_value=(path, "")):
+                win._media_restore()  # a bad file is reported, not raised
+            self.assertEqual(len(win.media_store.library()), 1)
+
+    def test_sources_card_says_whether_khinsider_is_reachable(self):
+        win = self.make_window()
+        self.addCleanup(win.close)
+        with mock.patch.object(st, "curl_cffi_available", lambda: False):
+            self.assertIn("python -m pip install curl_cffi", win._khi_status_text())
+        with mock.patch.object(st, "curl_cffi_available", lambda: True), mock.patch.object(st, "khinsider_wait_seconds", lambda: 0):
+            self.assertIn("Connected", win._khi_status_text())
+        with mock.patch.object(st, "curl_cffi_available", lambda: True), mock.patch.object(st, "khinsider_wait_seconds", lambda: 120):
+            self.assertIn("2 min", win._khi_status_text())
+
+    def test_keyboard_shortcuts_exist_and_a_tracks_length_is_known_before_it_plays(self):
+        from distill.downloads import RemoteFile
+
+        win = self.make_window()
+        self.addCleanup(win.close)
+        self.assertEqual(len(win._st_shortcuts), 7)
+        row = win._st_add_album(st.Album("khinsider", "x", "X", "", 1.0))
+        row.files = [RemoteFile("X/soundtrack/01 - A.mp3", "https://x/1", 5, seconds=215)]
+        self.assertEqual(win._st_items_for(row, [0])[0].seconds, 215)
 
     def test_clicking_the_cover_opens_a_larger_preview(self):
         from PySide6.QtGui import QColor, QPixmap
@@ -789,6 +1123,19 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual(win.start_btn.text(), "Save Selected Soundtracks")
         self.assertFalse(hasattr(win, "st_download_btn"))
 
+    def test_sound_page_has_no_start_pause_stop_bar_but_the_downloads_page_keeps_it(self):
+        win = self._shown_window()
+        win._show_page("sound")
+        self.assertTrue(win.bar_wrap.isHidden())
+        with mock.patch.object(win, "_st_download") as save:
+            win.start_btn.setEnabled(True)
+            from PySide6.QtGui import QShortcut
+            keys = {sc.key().toString(): sc for sc in win.findChildren(QShortcut)}
+            keys["Ctrl+Return"].activated.emit()
+            save.assert_not_called()
+        win._show_page("dl")
+        self.assertFalse(win.bar_wrap.isHidden())
+
     def test_quick_search_filters_tools_and_their_groups(self):
         win = self.make_window()
         self.addCleanup(win.close)
@@ -819,6 +1166,8 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.assertEqual(load_fonts(), ("Inter 18pt", "Outfit", "JetBrains Mono"))
 
     def test_seek_bar_wave_ripples_while_playing_and_settles_flat_when_paused(self):
+        from PySide6.QtCore import Qt
+
         win = self.make_window()
         self.addCleanup(win.close)
         win.show()
@@ -827,12 +1176,13 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         slider.setValue(400)
         slider.set_moving(True)
         self.assertTrue(slider._timer.isActive())
+        self.assertEqual(slider._timer.timerType(), Qt.TimerType.PreciseTimer)  # frames on time, not on the system's coarse clock
         for _ in range(60):
-            slider._tick()
+            slider.advance(1 / 30)  # two seconds
         self.assertGreater(slider._amp, 0.9)
         slider.set_moving(False)  # paused: eases flat, then stops redrawing
         for _ in range(120):
-            slider._tick()
+            slider.advance(1 / 30)
         self.assertEqual(slider._amp, 0.0)
         self.assertFalse(slider._timer.isActive())
         self.assertAlmostEqual(slider._fraction(), 0.4)
@@ -1053,7 +1403,9 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
                 self.pos = ms
 
         player, sounds = Player(), []
-        win._st_player, win._st_index, win._st_queue = player, 0, [("t", "g", "u", "")]
+        from distill.mediaqueue import QueueItem
+        win._st_player = player
+        win.pq.set([QueueItem("t", "g", "u", "", "khinsider", "x", 0)], 0)
         win._st_vinyl_play = lambda name, gain=1.0: sounds.append(name)  # (no audio device needed)
         win._st_scratch_start()
         self.assertEqual((player.calls, sounds), (["pause"], ["vinyl-stop"]))
@@ -1405,7 +1757,7 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         self.addCleanup(win.close)
         self.addCleanup(setattr, motion.Motion, "reduce", motion.Motion.reduce)
         motion.Motion.reduce = True  # buttons appear and go at once, so they can be checked
-        self.assertEqual(win.rc_add_btn.text(), "Add recomp...")
+        self.assertEqual(win.rc_add_btn.accessibleName(), "Add recomp")  # (a symbol: the words are its name and tooltip)
         mine = rcmod.replace(rcmod._recomp(rcmod.custom_entry("a/b", "Thing", "Game", "GameCube")), source=rcmod.CUSTOM_SOURCE)
         theirs = rcmod.replace(mine, id="other", source="")
         win._rc_apply_catalog([mine, theirs])
@@ -1560,6 +1912,59 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
             self.assertEqual(win.gm_list.count(), 1)
             win.gm_pills["all"].click()
             self.assertEqual(win.gm_list.count(), 3)
+
+    def test_game_cover_stage_makes_room_for_a_disc_behind_and_a_cartridge_above(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor, QImage, QPixmap
+        from PySide6.QtWidgets import QLabel
+
+        from distill.ui.games_widgets import CoverStage
+        from distill.ui.motion import Motion
+
+        self.addCleanup(setattr, Motion, "reduce", Motion.reduce)
+
+        def art(w: int, h: int, alpha: bool) -> QPixmap:
+            img = QImage(w, h, QImage.Format.Format_ARGB32 if alpha else QImage.Format.Format_RGB32)
+            img.fill(QColor("#4488cc"))
+            return QPixmap.fromImage(img)
+
+        cover = QLabel()
+        cover.setFixedSize(220, 314)
+        tops: list[int] = []
+        stage = CoverStage(cover)
+        stage.on_top_pad = tops.append
+        self.assertEqual((stage.width(), stage.height(), cover.pos().x(), cover.pos().y()), (220, 314, 0, 0))  # no media: just the cover
+
+        stage.set_media("disc", art(300, 300, True))
+        d = round(314 * CoverStage.DISC_SCALE)
+        self.assertEqual((stage.width(), stage.height(), cover.pos().y()), (220 + d // 2, 314, 0))  # half the disc sticks out to the right
+        self.assertEqual(stage.media_kind(), "disc")
+        stage.set_media("disc", art(300, 200, False))  # no see-through corners: cut round, still shown
+        self.assertEqual(stage.media_kind(), "disc")
+
+        stage.set_media("cart", art(200, 220, True))
+        h = round(round(220 * CoverStage.CART_SCALE) * 220 / 200)
+        self.assertEqual((stage.width(), stage.height(), cover.pos().y(), tops[-1]), (220, 314 + h // 2, h // 2, h // 2))  # half of it above the cover
+        stage.set_media("cart", art(200, 220, False))  # a cartridge with no see-through corners would look wrong: not shown
+        self.assertEqual((stage.media_kind(), stage.height(), cover.pos().y(), tops[-1]), ("", 314, 0, 0))
+
+        stage.set_media("disc", art(300, 300, True))
+        dirty = stage._disc_dirty()  # what is repainted each frame: the half that sticks out, not the half under the cover
+        self.assertEqual((dirty.left(), dirty.width()), (220, d // 2 + 2))
+        self.assertLess(stage._frame_ms(), 33)  # faster than the old 30 frames a second
+        Motion.reduce = False
+        stage.show()
+        self.assertTrue(stage._timer.isActive())  # turning while on screen
+        self.assertEqual(stage._timer.timerType(), Qt.TimerType.PreciseTimer)
+        self.assertEqual(stage._timer.interval(), stage._frame_ms())
+        stage.hide()
+        self.assertFalse(stage._timer.isActive())  # and not when it is not
+        Motion.reduce = True
+        stage.show()
+        self.assertFalse(stage._timer.isActive())  # reduced motion: shown still
+        stage.set_media("", None)
+        self.assertEqual((stage.width(), stage.height()), (220, 314))
+        stage.close()
 
     def test_games_page_shows_background_screenshots_and_achievements(self):
         import tempfile
@@ -1748,6 +2153,229 @@ class WindowSmokeTests(IsolatedSoundtrackFiles):
         win._gm_set_filter("status", "playing")
         self.assertIn("playing", win._gm_summary(1))
         win._gm_set_filter("", None)
+
+    def test_edit_game_window_media_and_emulator_tabs(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from distill import gamemedia as mm
+        from distill import games as gm
+        from distill.ui.games_dialog import EditGameDialog
+        from distill.ui.games_edit_tabs import BTN_H, BTN_W, PREVIEW_H, PREVIEW_W
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._gm_store = gm.GameStore(root / "games.db")
+        rom = SimpleNamespace(name="Metroid.sfc", system="SNES", kind="SFC", region="", size=1, modified=1.0, folder="", path=str(root / "Metroid.sfc"))
+        win._gm_store.sync([rom], str(root))
+        game = win._gm_store.games()[0]
+        duck = gm.Standalone("duckstation", "DuckStation", Path("/emu/duck.exe"))
+        png = b"\x89PNG\r\n\x1a\n" + bytes(64)
+        with mock.patch.object(mm, "MEDIA_DIR", root / "media"):
+            plain = EditGameDialog(win, game, ["SNES"], "", None)  # without them the window is as it was: one page, no tab strip
+            self.addCleanup(plain.close)
+            self.assertIsNone(plain.media_tab)
+            self.assertIsNone(plain.emu_tab)
+            self.assertEqual(plain.tabs.count(), 1)
+
+            dlg = EditGameDialog(win, game, ["SNES"], "", None, media_key="k1", emu_info=lambda system: gm.emulator_options(system, None, {"duckstation": duck}, ""))
+            self.addCleanup(dlg.close)
+            self.assertEqual([dlg.tabs.tabText(i) for i in range(dlg.tabs.count())], ["Details", "Media", "Emulator"])
+            dlg.media_tab.stage_art("back", "set", png)  # chosen, but nothing is kept before Save
+            self.assertEqual(mm.art_state("k1", "back"), "none")
+            dlg.media_tab.stage_art("back", "off")  # the last choice wins
+            self.assertEqual(dlg.media_plan.art["back"][0], "off")
+            dlg.media_tab.stage_art("back", "set", png)
+            media = dlg.media_tab
+            self.assertNotIn("logo", media.rows)  # (the clear logo is gone: the game's name is text)
+            every = (media.cover_row, *media.rows.values(), media.shots_row, media.manual_row)
+            self.assertEqual({(r.preview.width(), r.preview.height()) for r in every}, {(PREVIEW_W, PREVIEW_H)})  # one box for every picture
+            self.assertEqual({(r.find_btn.width(), r.file_btn.width(), r.none_btn.width(), r.auto_btn.width(), r.field.height()) for r in every},
+                             {(BTN_W, BTN_W, BTN_W, BTN_W, BTN_H)})
+            self.assertEqual({r.find_btn.text() + r.file_btn.text() + r.auto_btn.text() for r in every}, {""})  # symbols, not words
+            self.assertEqual({r.find_btn.toolTip().split()[0] for r in every}, {"Look"})
+            tab = dlg.emu_tab
+            tab.play_with.setCurrentIndex(tab.play_with.findData("duckstation"))
+            tab._changed()
+            tab.make_default.setChecked(True)
+            dlg._accept()
+            self.assertEqual((dlg.emulator, dlg.chosen_emulator, dlg.make_default), ("duckstation", "duckstation", True))
+            self.assertEqual(mm.apply_plan("k1", dlg.media_plan), [])
+            self.assertEqual(mm.art_state("k1", "back"), "custom")
+
+    def test_fetch_pictures_window_counts_what_is_missing_and_fetches_it(self):
+        import tempfile
+        import time
+        from pathlib import Path
+        from unittest import mock
+
+        from PySide6.QtWidgets import QApplication
+
+        from distill import gamemedia as mm
+        from distill import mediascrape as ms
+        from distill.ui.games_scrape_dialog import MediaScrapeDialog
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        entries = [("k1", "Metroid", "SNES"), ("k2", "Gran Turismo", "PlayStation"), ("k3", "Pong", "Arcade")]
+        with mock.patch.object(mm, "MEDIA_DIR", Path(tmp.name) / "media"):
+            dlg = MediaScrapeDialog(win, entries, entries[:1], "")
+            self.addCleanup(dlg.close)
+            self.assertTrue(dlg.scope.itemText(0).startswith("Selected games (1"))  # the chosen games come first, then the whole library and each platform
+            self.assertTrue(dlg.scope.itemText(1).startswith("Whole library (3"))
+            dlg.scope.setCurrentIndex(1)
+            dlg._recount()
+            self.assertEqual(len(dlg._jobs), 3)
+            self.assertTrue(dlg.start_btn.isEnabled())
+            for box in dlg.boxes.values():
+                box.setChecked(False)
+            dlg._recount()
+            self.assertEqual(dlg._jobs, [])
+            self.assertFalse(dlg.start_btn.isEnabled())  # nothing ticked: nothing to start
+            dlg.boxes["back"].setChecked(True)
+            dlg._recount()
+            self.assertEqual(len(dlg._jobs), 3)
+            with mock.patch.object(ms, "fetch_one", return_value=True):
+                dlg._start()
+                deadline = time.monotonic() + 15
+                while dlg._running and time.monotonic() < deadline:
+                    QApplication.processEvents()
+                    time.sleep(0.01)
+            self.assertFalse(dlg._running)
+            self.assertIn("3 background", dlg.summary.text())
+            self.assertTrue(dlg.found_any)
+            self.assertFalse(dlg.stop_btn.isVisibleTo(dlg))
+
+    def test_game_page_shows_placeholders_while_pictures_are_on_their_way(self):
+        import tempfile
+        import time
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from PySide6.QtGui import QPixmap
+
+        from distill import games as gm
+        from distill.ui.widgets import BackdropView
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        win = self.make_window()
+        self.addCleanup(win.close)
+        win._gm_store = gm.GameStore(root / "games.db")
+        rom = SimpleNamespace(name="Metroid.sfc", system="SNES", kind="SFC", region="", size=1, modified=1.0, folder="", path=str(root / "Metroid.sfc"))
+        win._gm_store.sync([rom], str(root))
+        game = win._gm_store.games()[0]
+        win._gm_pending, win._gm_pending_total = {"shots", "back"}, 2
+        win._gm_show_shots(game, [])  # nothing yet, but on its way: the card is there with placeholders in it
+        self.assertFalse(win.gmd_shots_card.isHidden())
+        win._gm_update_fetch()
+        self.assertEqual(win.gmd_fetch.text.text(), "Looking for the background and screenshots...")
+        win._gm_pending = set()  # the fetching is over and found none: the placeholders go
+        win._gm_show_shots(game, [])
+        self.assertTrue(win.gmd_shots_card.isHidden())
+        # a cover that has just arrived comes in over a few frames, and one that did not just arrive is simply there
+        self.assertEqual(win._gm_fade_of("nobody"), 1.0)
+        win._gm_art_born["x"] = time.monotonic()
+        self.assertLess(win._gm_fade_of("x"), 0.2)
+        win._gm_art_born["x"] = time.monotonic() - 5
+        self.assertEqual(win._gm_fade_of("x"), 1.0)
+        # the backdrop takes a picture at once, or fades to it
+        view = BackdropView()
+        self.addCleanup(view.close)
+        view.resize(800, 500)
+        pix = QPixmap(100, 60)
+        view.set_art(pix)
+        view.set_art(None, fade=True)
+        view.set_art(pix, fade=True)
+        self.assertGreaterEqual(view._mix, 0.0)
+        self.assertLessEqual(view._mix, 1.0)
+
+    def test_saves_and_library_health_windows(self):
+        import tempfile
+        import time
+        from pathlib import Path
+        from unittest import mock
+
+        from PySide6.QtWidgets import QApplication
+
+        from distill import games as gm
+        from distill import libraryhealth as lh
+        from distill import savebackup as sb
+        from distill.ui.games_health_dialog import LibraryHealthDialog
+        from distill.ui.games_saves_dialog import BackupAllDialog, SavesDialog
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "states").mkdir()
+        rom = root / "Metroid.sfc"
+        rom.write_bytes(b"rom")
+        (root / "states" / "Metroid.state").write_bytes(b"state")
+        setup = gm.RetroSetup(root / "retroarch.exe", {"snes9x": root / "x.dll"}, {"snes9x": {"corename": "Snes9x"}}, None, state_dir=root / "states")
+        game = gm.Game(id="g1", title="Metroid", system="SNES", path=str(rom))
+        win = self.make_window()
+        self.addCleanup(win.close)
+        with mock.patch.object(sb, "BACKUP_DIR", root / "backups"):
+            dlg = SavesDialog(win, game, setup)  # a game with a save and no backups yet
+            self.addCleanup(dlg.close)
+            self.assertTrue(dlg.backup_btn.isEnabled())
+            self.assertFalse(dlg.restore_btn.isEnabled())
+            dlg._backup()
+            self.assertEqual(dlg.list.count(), 1)
+            self.assertTrue(dlg.restore_btn.isEnabled())
+            none = SavesDialog(win, game, None)  # an emulator of its own: nothing to do, and it says why
+            self.addCleanup(none.close)
+            self.assertFalse(none.backup_btn.isEnabled())
+
+            bulk = BackupAllDialog(win, setup, [game])  # starts at once, finishes by itself
+            self.addCleanup(bulk.close)
+            deadline = time.monotonic() + 10
+            while bulk.stop_btn.isVisibleTo(bulk) and time.monotonic() < deadline:
+                QApplication.processEvents()
+                time.sleep(0.01)
+            self.assertTrue(bulk.close_btn.isVisibleTo(bulk))
+            self.assertIn("backed up the saves of 1 game", bulk.title_label.text())
+
+        issues = lh.check([game], {"g1"}, lambda g: False, 3)
+        health = LibraryHealthDialog(win, issues, 1)
+        self.addCleanup(health.close)
+        self.assertIsNone(health.choice)
+        health._choose(next(i for i in issues if i.key == "missing"))
+        self.assertEqual(health.choice, ("select", ["g1"]))
+        healthy = LibraryHealthDialog(win, [], 5)  # nothing wrong: it says so
+        self.addCleanup(healthy.close)
+
+    def test_media_tab_pictures_open_large_and_step_through_screenshots(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QPixmap
+
+        from distill.ui.games_edit_tabs import PictureZoom
+
+        pics = []
+        for colour in (Qt.GlobalColor.red, Qt.GlobalColor.green, Qt.GlobalColor.blue):
+            pix = QPixmap(320, 200)
+            pix.fill(colour)
+            pics.append(pix)
+        many = PictureZoom(None, "Screenshots", pics, 1)
+        self.addCleanup(many.close)
+        self.assertEqual((many.index, many.counter.text()), (1, "2 of 3"))
+        many._step(1)
+        many._step(1)  # past the last: round to the first
+        self.assertEqual(many.index, 0)
+        many._step(-1)
+        self.assertEqual(many.index, 2)
+        one = PictureZoom(None, "Cover", pics[:1])
+        self.addCleanup(one.close)
+        self.assertEqual(one.counter.text(), "")  # a lone picture has nothing to step through
+        self.assertTrue(one.prev_btn.isHidden() and one.next_btn.isHidden())
 
     def test_games_page_small_wins_random_recently_added_list_view_and_stats(self):
         import tempfile

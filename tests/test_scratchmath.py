@@ -7,7 +7,7 @@ import unittest
 import wave
 from pathlib import Path
 
-import make_vinyl_sounds
+from devtools import make_vinyl_sounds
 from distill.ui import scratchmath as sm
 
 ROOT = Path(__file__).resolve().parent.parent

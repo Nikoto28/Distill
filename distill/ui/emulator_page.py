@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QRect, QSize, QStandardPaths, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton,
     QTextBrowser, QVBoxLayout, QWidget,
@@ -26,10 +26,39 @@ from .fork_dialog import AddForkDialog
 from .retroarch_cores import CoresMixin
 from .ryujinx_ldn import LdnMixin
 from .theme import T
-from .widgets import accent_button, Card, detail_shell, ModalStack, hint
+from .widgets import accent_button, Card, detail_shell, ModalStack, hint, symbolize
 
 FILTERS = ("All emulators", "Installed", "Updates available", "Not installed", "For my library")
 TILES = (("installed", "installed", 1), ("updates", "updates available", 2), ("library", "match your library", 4))  # key, caption, filter it applies
+
+
+
+class WashView(QWidget):
+    """The root of an emulator's page. It paints the emulator's colour across the top and fades it into the page, so the top of the
+    page needs no card of its own (the Games and Recomps pages do the same with the game's art)."""
+    HEIGHT = 360
+
+    def __init__(self):
+        super().__init__()
+        self._colour = QColor(0, 0, 0, 0)
+
+    def set_colour(self, colour: QColor) -> None:
+        self._colour = QColor(colour)
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        if self._colour.alpha() == 0:
+            return
+        h = min(self.HEIGHT, self.height())
+        fade = QLinearGradient(0, 0, 0, h)
+        top, mid, end = QColor(self._colour), QColor(self._colour), QColor(self._colour)
+        top.setAlpha(70)
+        mid.setAlpha(26)
+        end.setAlpha(0)
+        fade.setColorAt(0.0, top)
+        fade.setColorAt(0.55, mid)
+        fade.setColorAt(1.0, end)
+        QPainter(self).fillRect(0, 0, self.width(), h, fade)
 
 
 class EmulatorMixin(CoresMixin, LdnMixin):
@@ -107,9 +136,11 @@ class EmulatorMixin(CoresMixin, LdnMixin):
                                      "Updates keep your saves and settings: only files the download replaces are touched.")
         self.em_root_btn = QPushButton("Choose...")
         self.em_root_btn.clicked.connect(self._em_choose_root)
+        symbolize(self.em_root_btn, "folder-open", "Choose the Emulators folder")
         self.em_scan_btn = QPushButton("Find installed")
         self.em_scan_btn.setToolTip("Look in the Emulators folder and the usual places for emulators you already have, and link them. Nothing is changed.")
         self.em_scan_btn.clicked.connect(lambda: self._em_scan(quiet=False))
+        symbolize(self.em_scan_btn, "search", "Find installed: " + self.em_scan_btn.toolTip())
         folder.addWidget(label)
         folder.addWidget(self.em_root_edit, 1)
         folder.addWidget(self.em_root_btn)
@@ -127,6 +158,7 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self.em_filter.currentIndexChanged.connect(self._em_fill)
         self.em_updates_btn = QPushButton("Check for updates")
         self.em_updates_btn.clicked.connect(lambda: self._em_check_updates(quiet=False))
+        symbolize(self.em_updates_btn, "refresh", "Check for updates")
         self.em_all_btn = accent_button("Update all")
         self.em_all_btn.clicked.connect(self._em_update_all)
         self.em_all_btn.setVisible(False)
@@ -178,7 +210,7 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         """One emulator's page. A hero (picture, name, status, the buttons and the progress of an install), then two columns: what it is,
         its release notes and its forks on the left; the facts, the update channel and the links in a side panel. Under about 820 px the
         panel drops below the column, and the whole page stays a readable width however wide the window is."""
-        view = QWidget()
+        view = self.emd_view = WashView()
         lay = detail_shell(view)  # no back button: click outside the card (or Esc) to close it; a fork's page closes to its emulator
 
         # -- the hero
@@ -243,6 +275,8 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         danger = (f"QPushButton:hover {{ background: {T.btn_danger[0].name()}; border-color: {T.btn_danger[1].name()}; color: {T.bad.name()}; }}")
         for w in (self.emd_launch, self.emd_folder, self.emd_locate, self.emd_remove, self.emd_unfork):
             w.setMinimumHeight(40)
+        symbolize(self.emd_launch, "play", "Launch")
+        symbolize(self.emd_folder, "folder-open", "Open folder")
         for w in (self.emd_remove, self.emd_unfork):
             w.setStyleSheet(danger)  # only the hover is red: the destructive buttons sit apart and stay quiet until pointed at
         for w in (self.emd_main, self.emd_launch, self.emd_folder, self.emd_locate):
@@ -329,6 +363,7 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self.emd_add_fork = QPushButton("Add fork...")
         self.emd_add_fork.setToolTip("Add someone's build of this emulator from GitHub.")
         self.emd_add_fork.clicked.connect(self._em_add_fork)
+        symbolize(self.emd_add_fork, "plus", "Add a fork: someone's build of this emulator from GitHub")
         add_row.addWidget(self.emd_add_fork)
         add_row.addStretch(1)
         self.emd_forks_card.add(add_row)
@@ -734,8 +769,8 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         colour = group_colour(src.group)
         self.emd_chip.setText((f"FORK OF {parent.name}  ·  {e.system}" if parent else f"{e.group}  ·  {e.system}").upper())
         T.bind_css(self.emd_chip, lambda: chip_css(colour))
-        T.bind_css(self.emd_hero, lambda: f"QFrame#card {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {tint(colour, 36)}, stop:0.6 {T.card.name()}, "
-            f"stop:1 {T.card.name()}); border: 1px solid {T.card_border.name()}; border-radius: 14px; }}")
+        T.bind_css(self.emd_hero, lambda: "QFrame#card { background: transparent; border: none; }")  # no card: the wash behind it is the top
+        self.emd_view.set_colour(colour)
         self._em_detail_logo(e)
         self.emd_title.setText(e.name)
         facts = []

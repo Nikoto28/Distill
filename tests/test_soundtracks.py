@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tests import helpers  # noqa: F401  (puts the project on sys.path)
@@ -516,6 +517,149 @@ class KHInsiderTests(unittest.TestCase):
         self.assertTrue(st.is_khinsider_page(tracks[0].url))
         self.assertEqual(st.parse_khinsider_album(self.ALBUM, "persona-5", "mp3")[0][0].ext, ".mp3")
 
+    def test_album_title_comes_from_the_page_content_not_the_menus(self):
+        page = '<div id="menu"><h2>Menu</h2></div><div id="pageContent"><h2>Persona 5</h2></div>' + self.ALBUM.split("</h2>", 1)[1]
+        self.assertEqual(st.parse_khinsider_album(page, "persona-5")[2]["title"], "Persona 5")
+
+    def test_real_world_row_markup_with_bold_headers_and_download_cells(self):
+        page = ('<table id="songlist"><tr id="songlist_header"><th>&nbsp;</th><th><b>CD</b></th><th><b>#</b></th><th><b>Song Name</b></th>'
+                '<th>&nbsp;</th><th><b>MP3</b></th><th><b>FLAC</b></th></tr>'
+                '<tr><td></td><td align="center">1</td><td align="right">1.</td><td class="clickable-row"><a href="/game-soundtracks/album/x/01%2520Intro.mp3">Intro</a></td>'
+                '<td class="clickable-row"><a>3:00</a></td><td class="clickable-row"><a>7.9 MB</a></td><td class="clickable-row"><a>28 MB</a></td>'
+                '<td class="playlistDownloadSong"><a href="/game-soundtracks/album/x/01%2520Intro.mp3">Get</a></td></tr>'
+                '<tr id="songlist_footer"><td></td><td></td><td></td><td><b>Total:</b></td><td><b>3:00</b></td><td><b>7.9 MB</b></td><td><b>28 MB</b></td></tr></table>')
+        (track,), _cover, _info = st.parse_khinsider_album(page, "x")
+        self.assertEqual((track.title, track.number, track.size, track.ext), ("Intro", 1, 28 * 1024 ** 2, ".flac"))
+        self.assertIn("/game-soundtracks/album/x/01%2520Intro.mp3", track.url)  # the double-encoded name is kept as the site wrote it
+
+    def test_a_saved_track_list_is_adjusted_for_mp3_only(self):
+        page = "https://downloads.khinsider.com/game-soundtracks/album/x/01.mp3"
+        saved = [st.Track(page, ".flac", "A", 1, 99, None, "", True, None)]
+        self.assertEqual(st.snapshot_for_quality(saved, "best"), saved)
+        (mp3,) = st.snapshot_for_quality(saved, "mp3")
+        self.assertEqual((mp3.ext, mp3.lossless, mp3.size, mp3.title), (".mp3", False, None, "A"))
+        self.assertEqual(saved[0].ext, ".flac")  # the saved list itself is untouched
+        other = [st.Track("https://archive.org/download/x/a.flac", ".flac", "A")]
+        self.assertIsNone(st.snapshot_for_quality(other, "mp3"))  # list those afresh
+        self.assertIsNone(st.snapshot_for_quality([], "mp3"))
+
+    def test_khinsider_pages_are_asked_for_like_a_browser_and_other_sites_are_left_alone(self):
+        self.enterContext(mock.patch.object(st, "_cffi_session", lambda: None))  # the plain urllib path
+        h = st.khinsider_headers("https://downloads.khinsider.com/search?search=x")
+        self.assertTrue(h["User-Agent"].startswith("Mozilla/5.0"))
+        self.assertIn("Accept-Language", h)
+        self.assertEqual(st.khinsider_headers("https://archive.org/advancedsearch.php"), {})
+        seen = {}
+
+        class Resp:
+            headers = type("H", (), {"get_content_charset": staticmethod(lambda: "utf-8")})()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n): return b"ok"
+
+        with mock.patch.object(st, "http_open", lambda url, headers=None, timeout=30: seen.update(headers or {}) or Resp()):
+            self.assertEqual(st.fetch_text("https://downloads.khinsider.com/x"), "ok")
+        self.assertIn("User-Agent", seen)
+
+    def test_a_cloudflare_challenge_is_recognised_and_khinsider_is_then_left_alone_for_a_while(self):
+        self.enterContext(mock.patch.object(st, "_cffi_session", lambda: None))  # the plain urllib path
+        import io
+        import urllib.error
+
+        page = b"<html><head><title>Just a moment...</title></head><body>cloudflare challenge</body></html>"
+        calls = []
+
+        def refuse(url, headers=None, timeout=30):
+            calls.append(url)
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {"cf-mitigated": "challenge"}, io.BytesIO(page))
+
+        st.reset_khinsider_block()
+        self.addCleanup(st.reset_khinsider_block)
+        with mock.patch.object(st, "http_open", refuse):
+            with self.assertRaises(st.ChallengeError) as cm:
+                st.fetch_text("https://downloads.khinsider.com/search?search=x")
+            self.assertIn("Cloudflare", str(cm.exception))
+            with self.assertRaises(st.ChallengeError):
+                st.fetch_text("https://downloads.khinsider.com/search?search=y")
+            self.assertEqual(len(calls), 1)  # the second was not even tried
+            st.reset_khinsider_block()
+            with self.assertRaises(st.ChallengeError):
+                st.fetch_text("https://downloads.khinsider.com/search?search=z")
+            self.assertEqual(len(calls), 2)
+
+    def test_challenge_detection(self):
+        self.assertTrue(st.is_challenge({"cf-mitigated": "challenge"}))
+        self.assertTrue(st.is_challenge({}, b"<title>Just a moment...</title> cloudflare"))
+        self.assertFalse(st.is_challenge({}, b"<title>Albums Published by Atlus</title>"))
+        self.assertFalse(st.is_challenge({}, b"just a moment, said the cashier"))  # no Cloudflare in it
+
+    def test_an_ordinary_403_from_khinsider_is_reported_as_a_refusal(self):
+        self.enterContext(mock.patch.object(st, "_cffi_session", lambda: None))  # the plain urllib path
+        import io
+        import urllib.error
+
+        def refuse(url, headers=None, timeout=30):
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {}, io.BytesIO(b"nope"))
+
+        st.reset_khinsider_block()
+        with mock.patch.object(st, "http_open", refuse):
+            with self.assertRaises(st.LinkError) as cm:
+                st.fetch_text("https://downloads.khinsider.com/x")
+        self.assertNotIsInstance(cm.exception, st.ChallengeError)
+        self.assertIn("403", str(cm.exception))
+
+    def test_a_real_publisher_page_is_read_as_it_is_served(self):
+        # A trimmed copy of a real page (downloads.khinsider.com/game-soundtracks/publisher/atlus, saved by the probe).
+        page = (Path(__file__).parent / "fixtures" / "khinsider" / "publisher_atlus_sample.html").read_text(encoding="utf-8")
+        albums = st.parse_khinsider_search(page)
+        by_slug = {a["slug"]: a for a in albums}
+        first = by_slug["101-in-1-party-megamix-wii-gamerip"]
+        self.assertEqual((first["title"], first["detail"]), ("101-in-1 Party Megamix", "Wii \u00b7 Gamerip \u00b7 2010"))
+        self.assertTrue(first["art"].startswith("https://lambda.vgmtreasurechest.com/soundtracks/101-in-1-party-megamix-wii-gamerip/thumbs_small/"))
+        self.assertEqual(by_slug["13-sentinels-aegis-rim-switch-gamerip-2022"]["detail"].split(" \u00b7 ")[0], "Switch")
+        self.assertEqual(len(albums), len(by_slug))  # nothing twice, though the page lists its top albums too
+
+    def test_with_curl_cffi_installed_khinsider_is_fetched_through_it(self):
+        class Resp:
+            status_code, headers, content = 200, {}, b"<html>albumList</html>"
+
+        class Session:
+            def __init__(self): self.calls = []
+            def get(self, url, headers=None, timeout=30):
+                self.calls.append((url, headers))
+                return Resp()
+
+        session = Session()
+        st.reset_khinsider_block()
+        with mock.patch.object(st, "_cffi_session", lambda: session), \
+                mock.patch.object(st, "http_open", side_effect=AssertionError("plain urllib must not be used")):
+            self.assertEqual(st.fetch_text("https://downloads.khinsider.com/search?search=x"), "<html>albumList</html>")
+        self.assertEqual(len(session.calls), 1)
+
+    def test_curl_cffi_still_challenged_says_so_and_waits(self):
+        class Resp:
+            status_code = 403
+            headers = {"cf-mitigated": "challenge"}
+            content = b"<title>Just a moment...</title> cloudflare"
+
+        class Session:
+            calls = 0
+            def get(self, url, headers=None, timeout=30):
+                Session.calls += 1
+                return Resp()
+
+        st.reset_khinsider_block()
+        self.addCleanup(st.reset_khinsider_block)
+        with mock.patch.object(st, "_cffi_session", lambda: Session()):
+            for _ in range(2):
+                with self.assertRaises(st.ChallengeError) as cm:
+                    st.fetch_text("https://downloads.khinsider.com/x")
+            self.assertIn("still refused", str(cm.exception))
+            self.assertEqual(Session.calls, 1)  # the second was not tried
+
+    def test_without_curl_cffi_the_message_says_how_to_get_it(self):
+        self.assertIn("pip install curl_cffi", st.CHALLENGE_MESSAGE)
+
     def test_track_page_gives_the_file_address(self):
         self.assertEqual(st.parse_khinsider_track(self.TRACK), "https://v/a/01%20A.flac")
         self.assertEqual(st.parse_khinsider_track(self.TRACK, "mp3"), "https://v/a/01%20A.mp3")
@@ -528,3 +672,299 @@ class KHInsiderTests(unittest.TestCase):
             st._RESOLVED.clear()
             out, problems = st.resolve_files(files)
         self.assertEqual((out[0].url, out[1].url, problems), ("https://v/a/01%20A.flac", "https://z/2.mp3", []))
+
+
+class GameMatchingTests(unittest.TestCase):
+    def test_platform_names_are_compared_by_meaning(self):
+        self.assertTrue(st.same_platform("Sony PlayStation 4", "PlayStation 4"))
+        self.assertTrue(st.same_platform("PS4", "PlayStation 4"))
+        self.assertTrue(st.same_platform("Super Nintendo Entertainment System", "SNES"))
+        self.assertTrue(st.same_platform("Nintendo Switch", "Switch"))
+        self.assertTrue(st.same_platform("Sega Genesis", "Mega Drive"))
+        self.assertFalse(st.same_platform("PlayStation 2", "PlayStation 4"))
+        self.assertFalse(st.same_platform("Super Nintendo", "Nintendo 64"))
+        self.assertFalse(st.same_platform("", "PC"))
+
+    def test_albums_for_the_games_platform_and_year_move_up_but_a_poor_title_does_not_win(self):
+        wrong = st.Album("khinsider", "a", "Persona 5", "PC \u00b7 2017", 0.95)
+        right = st.Album("khinsider", "b", "Persona 5", "PlayStation 4 \u00b7 2016", 0.90)
+        poor = st.Album("khinsider", "c", "Persona 3", "PlayStation 4 \u00b7 2016", 0.40)
+        ranked = st.rank_for_game([wrong, right, poor], "Sony PlayStation 4", "2016")
+        self.assertEqual([a.ident for a in ranked], ["b", "a", "c"])
+        self.assertEqual([a.ident for a in st.rank_for_game([wrong, right], "", "")], ["a", "b"])  # no hint: as found
+
+    def test_detail_line_is_split(self):
+        self.assertEqual(st.split_detail("PlayStation 4 \u00b7 Gamerip \u00b7 2016"), ("PlayStation 4", 2016))
+
+    def test_titles_of_the_same_release_share_a_merge_key(self):
+        self.assertEqual(st.album_merge_key("Celeste Original Soundtrack"), st.album_merge_key("Celeste"))
+        self.assertNotEqual(st.album_merge_key("Celeste"), st.album_merge_key("Celeste 2"))
+
+
+class LocalAlbumTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def touch(self, *parts):
+        p = self.root.joinpath(*parts)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * 10)
+        return p
+
+    def test_standard_and_romm_folders_are_found_as_albums(self):
+        self.touch("Soundtracks", "Celeste", "01 - Intro.flac")
+        self.touch("Soundtracks", "Celeste", "cover.jpg")
+        self.touch("Soundtracks", "Empty", "notes.txt")
+        self.touch("games", "SNES", "Chrono Trigger", "soundtrack", "01 - Prelude.mp3")
+        self.touch("games", "SNES", "Chrono Trigger", "Chrono Trigger.sfc")
+        albums = st.scan_local_albums(self.root, self.root / "games")
+        self.assertEqual([a.title for a in albums], ["Celeste", "Chrono Trigger"])
+        self.assertTrue(all(a.provider == "local" for a in albums))
+        self.assertTrue(albums[0].art.endswith("cover.jpg"))
+        self.assertEqual(albums[1].art, "")
+
+    def test_no_double_listing_when_the_games_folder_holds_the_standard_one(self):
+        self.touch("Soundtracks", "Celeste", "01 - A.mp3")
+        self.assertEqual(len(st.scan_local_albums(self.root, self.root)), 1)
+
+    def test_local_tracks_have_titles_numbers_discs_and_play_from_their_path(self):
+        self.touch("Soundtracks", "G", "Disc 1", "01 - First.flac")
+        self.touch("Soundtracks", "G", "Disc 2", "01 - Second.flac")
+        (album,) = st.scan_local_albums(self.root)
+        files = st.files_for("G", album)
+        self.assertEqual(len(files), 2)
+        self.assertTrue(all(st.is_local_path(f.url) for f in files))
+        self.assertFalse(st.is_local_path("https://x/a.mp3"))
+        tracks = st.LocalProvider().tracks(album)
+        self.assertEqual([(t.number, t.title, t.disc) for t in tracks], [(1, "First", 1), (1, "Second", 2)])
+
+
+class ProviderFailureTests(IsolatedSoundtrackFiles):
+    class Broken:
+        name = "broken"
+
+        def search(self, game):
+            raise st.LinkError("khinsider refused the request (HTTP 403)")
+
+        def tracks(self, album, prefer="best"):
+            raise st.LinkError("nope")
+
+    class Working:
+        name = "working"
+
+        def search(self, game):
+            return [st.Album("working", "p5", "Persona 5", "", 1.0)]
+
+        def tracks(self, album, prefer="best"):
+            return [st.Track("https://x/1.mp3", ".mp3", "A", 1)]
+
+    def test_one_source_failing_still_gives_the_others_albums_and_says_so_and_is_not_cached(self):
+        (res,) = st.find_albums([st.GameRequest("Persona 5")], providers=(self.Broken(), self.Working()), pause=0)
+        self.assertEqual([a.ident for a in res.albums], ["p5"])
+        self.assertIn("403", res.error)
+        self.assertEqual(st._load_cache(), {})  # nothing remembered
+        (again,) = st.find_albums([st.GameRequest("Persona 5")], providers=(self.Working(),), pause=0)
+        self.assertEqual(again.error, "")  # asked afresh once the source is back
+
+
+class RealKHInsiderPagesTests(unittest.TestCase):
+    """The parsers against pages saved from the live site (tests/fixtures/khinsider)."""
+
+    @staticmethod
+    def page(name):
+        return (Path(__file__).parent / "fixtures" / "khinsider" / name).read_text(encoding="utf-8")
+
+    def test_search_results(self):
+        rows = st.parse_khinsider_search(self.page("search_persona_5.html"))
+        self.assertEqual(len(rows), 12)
+        first = rows[0]
+        self.assertEqual((first["slug"], first["title"], first["detail"]), ("metagroove-2020", "METAGROOVE", "PS3, PS4 \u00b7 Arrangement \u00b7 2020"))
+        self.assertTrue(first["art"].startswith("https://lambda.vgmtreasurechest.com/soundtracks/metagroove-2020/thumbs_small/"))
+        self.assertEqual(st.split_detail(first["detail"]), ("PS3, PS4", 2020))
+
+    def test_album_page_tracks_durations_sizes_and_info(self):
+        tracks, cover, info = st.parse_khinsider_album(self.page("album_metagroove.html"), "metagroove-2020")
+        self.assertEqual(len(tracks), 13)
+        t = tracks[0]
+        self.assertEqual((t.number, t.title, t.seconds, t.ext, t.lossless), (1, "Life Will Change", 320, ".flac", True))
+        self.assertEqual(t.size, 37790679)  # 36.04 MB, the FLAC column
+        self.assertIn("/game-soundtracks/album/metagroove-2020/01.%2520Life%2520Will%2520Change.mp3", t.url)
+        self.assertEqual(st.fmt_total(sum(x.seconds or 0 for x in tracks)), "1 h 19 min")  # the page's own total: 1h 19m
+        self.assertEqual(cover, "https://lambda.vgmtreasurechest.com/soundtracks/metagroove-2020/cover.jpg")
+        self.assertEqual((info["title"], info["platforms"], info["year"], info["publisher"], info["type"]),
+                         ("METAGROOVE", "PS3, PS4", "2020", "J-Music Ensemble", "Arrangement"))
+        self.assertEqual(len(info["related"]), 12)
+        self.assertEqual(info["related"][1]["slug"], "persona-5")
+
+    def test_mp3_only_picks_the_mp3_column(self):
+        mp3 = st.parse_khinsider_album(self.page("album_metagroove.html"), "metagroove-2020", "mp3")[0][0]
+        self.assertEqual((mp3.ext, mp3.size), (".mp3", int(10.47 * 1024 * 1024)))
+
+    def test_track_page_file_addresses(self):
+        page = self.page("track_metagroove.html")
+        self.assertEqual(st.parse_khinsider_track(page),
+                         "https://lambda.vgmtreasurechest.com/soundtracks/metagroove-2020/xbqytxht/01.%20Life%20Will%20Change.flac")
+        self.assertTrue(st.parse_khinsider_track(page, "mp3").endswith("01.%20Life%20Will%20Change.mp3"))
+
+    def test_ranked_list(self):
+        top = st.parse_khinsider_toplist(self.page("top40.html"))
+        self.assertEqual(len(top), 40)
+        self.assertEqual((top[0]["rank"], top[0]["slug"]), (1, "minecraft"))
+        self.assertEqual(top[1]["rank"], 2)
+
+    def test_latest_page_and_its_page_counter(self):
+        page = self.page("home_latest.html")
+        self.assertEqual(len(st.parse_khinsider_search(page)), 15)
+        self.assertEqual(st.parse_khinsider_pages(page), (1, 620))
+        self.assertEqual(st.parse_khinsider_pages("<html></html>"), (1, 1))
+
+    def test_console_list(self):
+        consoles = st.parse_khinsider_consoles(self.page("console_list.html"))
+        self.assertEqual(len(consoles), 69)
+        self.assertEqual(consoles[0], ("3do", "3DO", 173))
+        self.assertIn(("nintendo-3ds", "3DS", 1807), consoles)
+
+    def test_cover_tiles(self):
+        tiles = st.parse_khinsider_tiles(self.page("album_metagroove.html"), after="People who viewed this also viewed")
+        self.assertEqual(len(tiles), 12)
+        self.assertEqual(tiles[0]["title"], "Persona 5 Royal - The Complete Soundtrack (2016)")
+        self.assertEqual(st.parse_khinsider_tiles("<html></html>", after="nothing"), [])
+
+
+class CoverQualityTests(unittest.TestCase):
+    """The covers on khinsider's lists are tiny thumbnails; the same picture is fetched sharper where there is one."""
+    SMALL = "https://lambda.vgmtreasurechest.com/soundtracks/metagroove-2020/thumbs_small/cover.jpg"
+    MEDIUM = "https://lambda.vgmtreasurechest.com/soundtracks/metagroove-2020/thumbs/cover.jpg"
+    FULL = "https://lambda.vgmtreasurechest.com/soundtracks/metagroove-2020/cover.jpg"
+    JPEG = b"\xff\xd8\xff" + bytes(32)
+    PNG = b"\x89PNG\r\n\x1a\n" + bytes(32)
+
+    def test_a_list_thumbnail_is_tried_full_size_then_medium_then_as_it_is(self):
+        self.assertEqual(st.cover_candidates(self.SMALL), [self.FULL, self.MEDIUM, self.SMALL])
+
+    def test_a_medium_one_is_tried_full_size_then_as_it_is(self):
+        self.assertEqual(st.cover_candidates(self.MEDIUM), [self.FULL, self.MEDIUM])
+
+    def test_the_name_and_any_query_are_kept(self):
+        got = st.cover_candidates("https://x.example/soundtracks/a-b/thumbs_small/00%20Front.jpg?v=2")
+        self.assertEqual(got[0], "https://x.example/soundtracks/a-b/00%20Front.jpg?v=2")
+
+    def test_other_addresses_are_left_alone(self):
+        for url in (self.FULL, "https://archive.org/services/img/some-item", "C:/Music/Game/cover.jpg", "/home/me/cover.png"):
+            self.assertEqual(st.cover_candidates(url), [url])
+        self.assertEqual(st.cover_candidates(""), [])
+
+    def test_the_sharpest_picture_is_the_one_returned(self):
+        asked = []
+
+        def reader(url, limit):
+            asked.append(url)
+            return self.JPEG
+
+        self.assertEqual(st.fetch_cover(self.SMALL, reader=reader), self.JPEG)
+        self.assertEqual(asked, [self.FULL])  # (nothing more was fetched)
+
+    def test_a_missing_or_oversize_sharper_picture_falls_back_a_step_at_a_time(self):
+        def reader(url, limit):
+            if url == self.FULL:
+                raise st.CoverTooBig(url)
+            if url == self.MEDIUM:
+                raise OSError("404")
+            return self.PNG
+
+        self.assertEqual(st.fetch_cover(self.SMALL, reader=reader), self.PNG)  # (the thumbnail the list gave, as before)
+
+    def test_a_sharper_address_that_is_not_a_picture_is_passed_over(self):
+        def reader(url, limit):
+            return b"<html>not found</html>" if url == self.FULL else self.JPEG
+
+        self.assertEqual(st.fetch_cover(self.SMALL, reader=reader), self.JPEG)
+
+    def test_the_address_given_failing_is_an_error_and_too_big_is_no_cover(self):
+        def broken(url, limit):
+            raise OSError("down")
+
+        def huge(url, limit):
+            raise st.CoverTooBig(url)
+
+        with self.assertRaises(OSError):
+            st.fetch_cover(self.FULL, reader=broken)
+        self.assertEqual(st.fetch_cover(self.FULL, reader=huge), b"")
+
+    def test_a_big_cover_is_refused_from_its_header_without_downloading_it(self):
+        class Resp:
+            headers = {"Content-Length": str(st.COVER_MAX_BYTES + 1)}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n=-1):
+                raise AssertionError("the body must not be downloaded")
+
+        with mock.patch.object(st, "http_open", lambda url, timeout=30: Resp()):
+            with self.assertRaises(st.CoverTooBig):
+                st.read_cover(self.FULL)
+
+    def test_a_cover_on_this_computer_is_read_as_it_is(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cover.jpg"
+            path.write_bytes(self.JPEG)
+            self.assertEqual(st.fetch_cover(str(path)), self.JPEG)
+
+    def test_the_picture_type_comes_from_the_picture(self):
+        self.assertEqual((st.image_mime(self.JPEG), st.image_mime(self.PNG), st.image_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 "), st.image_mime(b"<html>")),
+                         ("image/jpeg", "image/png", "image/webp", ""))
+
+
+class DurationTests(unittest.TestCase):
+    def test_lengths_are_read_and_shown(self):
+        self.assertEqual((st.to_seconds("215.42"), st.to_seconds("3:35"), st.to_seconds("1:02:03"), st.to_seconds(215)), (215, 215, 3723, 215))
+        self.assertEqual((st.to_seconds(None), st.to_seconds(""), st.to_seconds("n/a"), st.to_seconds("0")), (None, None, None, None))
+        self.assertEqual((st.fmt_clock(320), st.fmt_clock(3723), st.fmt_clock(None), st.fmt_clock(0)), ("5:20", "1:02:03", "", ""))
+        self.assertEqual((st.fmt_total(834), st.fmt_total(4740), st.fmt_total(45), st.fmt_total(None)), ("13 min 54 s", "1 h 19 min", "45 s", ""))
+
+    def test_a_tracks_length_travels_to_its_file(self):
+        (f,) = st.layout("G", [st.Track("https://x/1.mp3", ".mp3", "A", 1, 5, None, "", False, None, 215)])
+        self.assertEqual(f.seconds, 215)
+
+
+class PlaylistFileAndBrowseTests(unittest.TestCase):
+    def test_an_m3u_has_a_line_of_info_and_the_location_per_track(self):
+        text = st.m3u_text([("Persona 5 - Life Will Change", 320, "https://x/1.flac"), ("A\nB", None, "C:\\music\\2.mp3")])
+        self.assertEqual(text.splitlines(), ["#EXTM3U", "#EXTINF:320,Persona 5 - Life Will Change", "https://x/1.flac",
+                                             "#EXTINF:-1,A B", "C:\\music\\2.mp3"])
+
+    def test_browse_addresses(self):
+        self.assertEqual(st.browse_path("platform", "nintendo-switch"), "/game-soundtracks/nintendo-switch")
+        self.assertEqual(st.browse_path("year", "2016"), "/game-soundtracks/year/2016")
+        self.assertEqual((st.browse_path("letter", "a"), st.browse_path("letter", "0-9"), st.browse_path("letter", "#")),
+                         ("/game-soundtracks/browse/A", "/game-soundtracks/browse/0-9", "/game-soundtracks/browse/0-9"))
+        with self.assertRaises(ValueError):
+            st.browse_path("colour", "red")
+
+    def test_real_search_results_rank_the_games_own_titles_first(self):
+        page = (Path(__file__).parent / "fixtures" / "khinsider" / "search_persona_5.html").read_text(encoding="utf-8")
+        albums = [st.Album("khinsider", d["slug"], d["title"], d["detail"], max(st.match_score("Persona 5", d["title"]), 0.1), d["art"])
+                  for d in st.parse_khinsider_search(page)]
+        ranked = sorted(albums, key=lambda a: -a.score)
+        self.assertTrue(all(a.title.startswith("Persona 5") for a in ranked[:5]))
+        self.assertNotEqual(ranked[0].title, "METAGROOVE")  # the site lists that one first
+        hinted = st.rank_for_game(ranked, "Sony PlayStation 4", "2016")
+        self.assertEqual(hinted[0].title, "Persona 5 -PS4 Edition-")
+
+    def test_a_queue_items_length_survives_a_restart(self):
+        from distill.mediaqueue import PlayQueue, QueueItem
+        q = PlayQueue()
+        q.set([QueueItem("t", "A", "u", "", "khinsider", "x", 0, "PC", 215)], 0)
+        again = PlayQueue()
+        again.restore(q.state())
+        self.assertEqual(again.items[0].seconds, 215)
+        again.restore({"items": [["t", "A", "u", "", "khinsider", "x", 0, "PC"]], "order": [0]})  # saved before lengths existed
+        self.assertEqual(again.items[0].seconds, 0)

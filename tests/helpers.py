@@ -24,11 +24,17 @@ class IsolatedSoundtrackFiles(unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         from unittest import mock
-        from distill import soundtracks
+        from distill import mediastore, soundtracks
 
         td = tempfile.TemporaryDirectory(prefix="distill_app_")
         self.addCleanup(td.cleanup)
         root = Path(td.name)
+        media = mock.patch.object(mediastore, "DB_FILE", root / "media.db")  # the Media page's own database
+        media.start()
+        self.addCleanup(media.stop)
+        offline = mock.patch.object(soundtracks.KHInsiderProvider, "search", lambda self, game: [])  # never the real site
+        offline.start()
+        self.addCleanup(offline.stop)
         for name, file in (("CACHE_FILE", "cache.json"), ("SAVES_FILE", "saves.json"), ("PREFS_FILE", "prefs.json")):
             patcher = mock.patch.object(soundtracks, name, root / file)
             patcher.start()

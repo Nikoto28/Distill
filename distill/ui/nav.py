@@ -6,7 +6,7 @@ from ..orgpages import ORG_PAGES
 
 NAV_GROUPS = (
     ("GAMES", (("games", "Games"), ("recomps", "PC Recomps"), ("emus", "Emulators"))),
-    ("DOWNLOADS", (("dl", "Files & Torrents"), ("sound", "Soundtrack Grabber"))),
+    ("DOWNLOADS", (("dl", "Files & Torrents"), ("sound", "Distill Resonance"))),
     ("CONVERT & COMPRESS", (("chd", "CHD Compression"), ("cso", "CSO (PSP Images)"), ("ps3", "PS3 ISO / Folder"),
                             ("pkg", "PS4 PKG Manager"), ("pkg5", "PS5 PKG Manager"), ("rvz", "RVZ (Dolphin)"),
                             ("switch", "Switch NSZ / NUP"), ("xbox", "Xbox ISO / XEX"), ("zar", "ZAR Archive Tool"))),
@@ -35,7 +35,7 @@ PAGE_INFO = {
                                    "archives."),
     "dl": ("Files & Torrents", "Download archive.org items, file lists, links, magnets and .torrent files, "
                                         "with resume and verification."),
-    "sound": ("Soundtrack Grabber", "Search, stream and save game soundtracks (FLAC or MP3) from KHInsider and archive.org, tagged and filed in "
+    "sound": ("Distill Resonance", "Search, stream and save game soundtracks (FLAC or MP3) from KHInsider and archive.org, tagged and filed in "
                                     "one folder or beside each game for RomM."),
     "games": ("Games", "Your own game library: every platform in one place, with covers, details and a Play button. "
                       "Games start in RetroArch."),
@@ -46,7 +46,7 @@ PAGE_INFO = {
     "fix": ("Fix Names & Discs", "Tidy filenames, group each multi-disc game with a playlist, fix broken playlists and "
                                   "repair disc images."),
     "extras": ("Remove Extras & Junk", "Find leftovers, duplicate games and extra releases, then remove what you "
-                                             "tick."),
+                                             "select."),
     "patch": ("Patch ROMs", "Apply IPS, UPS, BPS and xdelta patches to ROMs for translations and hacks, with "
                             "checksum verification. The original is kept."),
     "bysystem": ("Sort by System", "Move each game into a folder for its console, identified from the file itself."),

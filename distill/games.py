@@ -955,6 +955,7 @@ class RetroSetup:
     states_by_core: bool = False  # "Sort save states into folders by core name"
     states_by_content: bool = False  # "... by content directory"
     playlist_dir: Path | None = None  # where its playlists (.lpl) go
+    save_dir: Path | None = None  # where its battery saves (.srm) go; None = beside the game (RetroArch's "default")
 
     def core_label(self, name: str) -> str:
         return self.infos.get(name, {}).get("display_name") or name.replace("_", " ").title()
@@ -973,7 +974,14 @@ def retro_setup(folder: str, exe: str, linked: str = "") -> RetroSetup | None:
     cores = lc.scan_installed(loc.cores, suffix)
     state_dir, by_core, by_content = retro_state_options(program, loc)
     return RetroSetup(program, cores, read_infos(loc.info, cores), retro_system_dir(program, loc), state_dir, by_core, by_content,
-                      retro_playlist_dir(program, loc))
+                      retro_playlist_dir(program, loc), retro_save_dir(program, loc))
+
+
+def retro_save_dir(program: Path, loc) -> Path | None:
+    """RetroArch's battery save folder as its retroarch.cfg names it; None when saves are kept beside the game (the cfg's "default", or no cfg)."""
+    exe_dir = program if program.suffix.lower() == ".app" else program.parent
+    cfg = lc.read_cfg(loc.config) if getattr(loc, "config", None) else {}
+    return lc._resolve(cfg.get("savefile_directory", ""), exe_dir, Path.home())
 
 
 def retro_system_dir(program: Path, loc) -> Path:
@@ -1045,10 +1053,12 @@ class SaveState:
     saved: float
 
 
-def _state_folders(setup: RetroSetup, core: str, rom: Path) -> list[Path]:
+def _state_folders(setup: RetroSetup, core: str, rom: Path, root: Path | None = ...) -> list[Path]:  # type: ignore[assignment]
     """Every folder RetroArch may have put this game's states in: the save state folder (or the game's own folder when none is set), and the
-    sub-folders it makes when states are sorted by core and/or by the game's folder (matched without regard to case)."""
-    roots = [setup.state_dir] if setup.state_dir is not None else []
+    sub-folders it makes when states are sorted by core and/or by the game's folder (matched without regard to case). Pass `root` (a folder or
+    None for 'beside the game') to look for something else it sorts the same way, such as battery saves."""
+    configured = setup.state_dir if root is ... else root
+    roots = [configured] if configured is not None else []
     roots.append(rom.parent)
     info = setup.infos.get(core, {})
     names = {n.casefold() for n in (info.get("corename", ""), info.get("display_name", ""), core, setup.core_label(core)) if n}
@@ -1325,6 +1335,54 @@ def platform_health(system: str, games: int, default: str, setup: RetroSetup | N
     return out
 
 
+@dataclass(slots=True)
+class EmulatorOptions:
+    """What can play one platform, for the Edit window's Emulator tab: the ways to play it, which is the platform's default, what 'Automatic'
+    would pick, and the launch options of each emulator of its own."""
+    system: str
+    choices: list[tuple[str, str]]  # (launch choice, label) for each installed RetroArch core and emulator of its own
+    default: str  # the launch choice saved for the platform ('' = automatic)
+    auto_label: str  # what Automatic starts it with: 'mGBA', 'PCSX2' ('' when nothing can play it)
+    problem: str  # why nothing can play it ('' when something can)
+    args: dict[str, tuple[str, str, str]]  # emulator id -> (its name, the options it is started with, Distill's own options for it)
+
+    @property
+    def playable(self) -> bool:
+        return bool(self.choices)
+
+    def label_of(self, choice: str) -> str:
+        return next((label for c, label in self.choices if c == choice), "")
+
+    def effective(self, choice: str) -> str:
+        """The emulator that starts a game with this choice ('' = automatic): 'retroarch', an emulator's id, or '' when nothing can."""
+        emu, _core = parse_choice(choice or self.default)
+        if emu:
+            return emu
+        if any(c.startswith(RETROARCH + ":") for c, _label in self.choices):
+            return RETROARCH
+        return self.choices[0][0] if self.choices else ""
+
+
+def emulator_options(system: str, setup: RetroSetup | None, emus: dict[str, Standalone], default: str) -> EmulatorOptions:
+    """Work out what can play `system` (see `platform_choices`), and what Automatic would use, without starting anything."""
+    choices = platform_choices(system, setup, emus)
+    args = {rid: (s.name, *launch_options(rid, s.args)) for rid, s in emus.items()}
+    if not choices:
+        want = ", ".join(preferred_cores(system)[:2])
+        problem = (f"Nothing installed can play {system}. Install an emulator for it on the Emulators page"
+                   + (f", or a RetroArch core ({want} is a good choice)." if want else "."))
+        return EmulatorOptions(system, [], default, "", problem, args)
+    cores = cores_for(system, setup.cores, setup.infos) if setup else []
+    dem, dchoice = parse_choice(default)
+    if cores:
+        auto = setup.core_label(dchoice if dem == RETROARCH and dchoice in cores else cores[0])
+    else:
+        auto = next(iter(emus.values())).name
+    if dem in emus:
+        auto = emus[dem].name
+    return EmulatorOptions(system, choices, default, auto, "", args)
+
+
 def health_overview(counts: Iterable[tuple[str, int]], default_for: Callable[[str], str], setup: RetroSetup | None,
                     emus_for: Callable[[str], dict[str, Standalone]]) -> list[PlatformHealth]:
     """Every platform in the library with its health, the ones that need attention first (then by name)."""
@@ -1369,14 +1427,15 @@ def watch_session(proc, on_done: Callable[[float], None]) -> threading.Thread:
     return thread
 
 
-def spawn(plan: LaunchPlan) -> subprocess.Popen:
-    """Start the emulator on its own, so closing Distill doesn't close the game."""
+def spawn(plan: LaunchPlan, detach: bool = True) -> subprocess.Popen:
+    """Start the emulator on its own, so closing Distill doesn't close the game. With `detach` off it stays in the caller's process tree
+    instead (what `distill --launch` wants: Sunshine ends the game by ending that tree when the stream stops)."""
     flags = 0
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    if sys.platform == "win32":
+    if sys.platform == "win32" and detach:
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     try:
-        return subprocess.Popen(plan.cmd, cwd=plan.cwd, creationflags=flags, close_fds=True, start_new_session=(sys.platform != "win32"), **quiet)
+        return subprocess.Popen(plan.cmd, cwd=plan.cwd, creationflags=flags, close_fds=True, start_new_session=(detach and sys.platform != "win32"), **quiet)
     except OSError as exc:
         raise GameError(f"Couldn't start it: {exc}") from exc
 
@@ -1620,14 +1679,21 @@ def lb_candidates(title: str, system: str = "") -> tuple[list[str], dict[str, st
     first: list[list[str]] = []  # answers to the searches that named the platform: their best results are the ones on it
     rest: list[list[str]] = []
     reached = False
-    for q, is_named in [*((q, True) for q in dict.fromkeys(named)), *((q, False) for q in plain)]:
-        if not q.strip():
-            continue
+    jobs = [(q, is_named) for q, is_named in [*((q, True) for q in dict.fromkeys(named)), *((q, False) for q in plain)] if q.strip()]
+
+    def fetch(q: str) -> str | None:
         try:
-            page = rc._get(rc._LB_SEARCH + urllib.parse.quote(q), timeout=15).decode("utf-8", "replace")
-            reached = True
+            return rc._get(rc._LB_SEARCH + urllib.parse.quote(q), timeout=15).decode("utf-8", "replace")
         except (urllib.error.URLError, OSError, ValueError):
+            return None
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(4, len(jobs)))) as pool:  # (all the spellings are searched at once, not one after another)
+        answers = list(pool.map(fetch, [q for q, _n in jobs]))
+    for (q, is_named), page in zip(jobs, answers):
+        if page is None:
             continue
+        reached = True
         for m in rc._LB_LINK.finditer(page):
             slugs.setdefault(m[1], m[2] or "")
         (first if is_named else rest).append(rc._lb_game_ids(page, title, want or "\0"))
@@ -1702,7 +1768,7 @@ def common_folder(games: Iterable[Game]) -> Path | None:
 
 
 def soundtrack_names(games: Iterable[Game]) -> list[str]:
-    """One name per game for the Soundtrack Grabber's box: versions and discs of the same game count once."""
+    """One name per game for the Distill Resonance's box: versions and discs of the same game count once."""
     seen: set[str] = set()
     out: list[str] = []
     for g in sorted(games, key=lambda x: (x.name.casefold(), x.region)):

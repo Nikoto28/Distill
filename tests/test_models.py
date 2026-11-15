@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from distill.batch import plan_workers
-from distill.models import (BatchSummary, Config, Failure, exit_reason, fmt_duration, fmt_size, path_bytes,
+from distill.models import (BatchSummary, Config, Failure, exit_reason, fmt_duration, fmt_size, path_bytes, plural,
                              remove_path, size_change, space_report)
 from tests.helpers import TempDirTest
 
@@ -22,6 +22,14 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(fmt_size(5 * 1024 ** 2), "5.00 MB")
         self.assertEqual(fmt_size(3 * 1024 ** 3 + 512 * 1024 ** 2), "3.50 GB")
         self.assertEqual(fmt_size(5000 * 1024 ** 3), "5,000.00 GB")  # no TB unit: stays in GB
+
+    def test_plural(self):
+        self.assertEqual(plural(0, "track"), "0 tracks")
+        self.assertEqual(plural(1, "track"), "1 track")
+        self.assertEqual(plural(2, "album"), "2 albums")
+        self.assertEqual(plural(1, "library", "libraries"), "1 library")
+        self.assertEqual(plural(3, "library", "libraries"), "3 libraries")
+        self.assertEqual(plural(1200, "song"), "1,200 songs")
 
     def test_fmt_duration(self):
         self.assertEqual(fmt_duration(0), "<1m")

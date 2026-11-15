@@ -3,3 +3,4 @@ py7zr>=0.21
 libtorrent>=2.0,<3
 mutagen>=1.47
 pyzstd>=0.15
+curl_cffi>=0.7  # lets Distill past KHInsider's Cloudflare check (the Media page's main source); without it only archive.org is used

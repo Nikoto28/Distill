@@ -624,7 +624,7 @@ def _append_run_log(title: str, made: str, done: list[Finding]) -> None:
 
 def report_rows(tool_title: str, findings: list[Finding], checked: set[int]) -> list[list[str]]:
     """A preview as rows (what would happen, to which file) for saving before anything is touched."""
-    rows = [["Tool", "Item", "Ticked", "Status", "Action", "From", "To"]]
+    rows = [["Tool", "Item", "Selected", "Status", "Action", "From", "To"]]
     for i, f in enumerate(findings):
         state = "Blocked" if f.problem else "Yes" if i in checked else "No"
         if not f.ops:
@@ -738,7 +738,7 @@ def find_multidisc(root: Path, recursive: bool, opts: dict, stop: threading.Even
         found = missing
     notes = []
     if any(not f.checked for f in found):
-        notes.append("similar-name matches are left unticked")
+        notes.append("similar-name matches are left deselected")
     if missing:
         notes.append(f"{len(missing)} game(s) are missing discs")
     return found, "; ".join(notes)
@@ -874,9 +874,9 @@ def find_duplicates(root: Path, recursive: bool, opts: dict, stop: threading.Eve
         out.append(Finding(keeper.stem, str(len(members)), f"Keeping {_rel(keeper, root)}  |  frees {fmt_size(freed)}{extra}",
                            kids, ops, checked=ticked, size=freed))
     how = {MATCH_MODES[0]: "matched by name, not by contents",
-           MATCH_MODES[1]: "matched by title; these are left unticked for you to check",
+           MATCH_MODES[1]: "matched by title; these are left deselected for you to check",
            MATCH_MODES[2]: "matched by contents" + (f"; {skipped} .cue / .gdi sheet(s) skipped" if skipped else "")}[mode]
-    return out, how + ("; ROMs and other game files included, left unticked" if other and mode != MATCH_MODES[2] else "")
+    return out, how + ("; ROMs and other game files included, left deselected" if other and mode != MATCH_MODES[2] else "")
 
 
 # ---- Tool 3b: one game, one ROM (1G1R) ---------------------------------------------------------------------------
@@ -1393,7 +1393,7 @@ def _name_related(rom: Path, patch: Path) -> bool:
 def _refresh_patch_rows(f: Finding) -> None:
     f.count = str(len(f.data))
     f.children = [(c.patch.name, "", c.problem or c.label) for c in f.data]
-    f.note = f"{sum(1 for c in f.data if c.ticked and not c.problem)} ticked" if f.data else "No patch found"
+    f.note = f"{sum(1 for c in f.data if c.ticked and not c.problem)} selected" if f.data else "No patch found"
 
 
 def _game_row(rom: Path, root: Path, cands: list[PatchCandidate]) -> Finding:

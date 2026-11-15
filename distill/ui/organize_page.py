@@ -183,8 +183,8 @@ class OrganizeMixin:
             lay.addWidget(card)
 
         results = Card("Scan Results")
-        results.add(hint("Tick the patches to apply; right-click a game or a patch to match them by hand."
-                         if page_def.key == "patch" else "Click a row to tick or untick it. The arrow shows its details."))
+        results.add(hint("Select the patches to apply; right-click a game or a patch to match them by hand."
+                         if page_def.key == "patch" else "Click a row to select or deselect it. The arrow shows its details."))
         tools_bar = QHBoxLayout()
         for text, fn in (("Select all", lambda _c=False, k=page_def.key: self._org_select(k, True)),
                          ("Clear all", lambda _c=False, k=page_def.key: self._org_select(k, False)),
@@ -199,7 +199,7 @@ class OrganizeMixin:
         st.steps_label.setVisible(False)
         results.add(st.steps_label)
         tree = st.tree = CheckTree()
-        st.reveal = RevealDelegate(tree)  # the same cascade as the Soundtrack Grabber's list
+        st.reveal = RevealDelegate(tree)  # the same cascade as the Distill Resonance's list
         tree.setItemDelegate(st.reveal)
         tree.placeholder = "Nothing scanned yet.\nChoose a folder above and press Scan to see what can be done."
         tree.setColumnCount(3)
@@ -331,7 +331,7 @@ class OrganizeMixin:
     def _org_update_status(self, key: str) -> None:
         st = self.org[key]
         ticked = [st.findings[i] for i in st.checked]
-        text = f"{len(ticked)} of {len(st.findings)} ticked"
+        text = f"{len(ticked)} of {len(st.findings)} selected"
         if freed := sum(f.size for f in ticked):
             text += f"  |  frees {fmt_size(freed)}"
         if blocked := sum(1 for f in st.findings if f.problem):
@@ -392,8 +392,8 @@ class OrganizeMixin:
             picks = [st.findings[i] for i in sorted(st.checked) if not st.findings[i].problem]
             pick_rows = [i for i in sorted(st.checked) if not st.findings[i].problem]  # tree row of each pick
         if not picks:
-            self._toast("Scan a folder and tick at least one item first." if tool.key != "patch"
-                        else "Scan a folder and tick at least one patch first.", "warn", 6000)
+            self._toast("Scan a folder and select at least one item first." if tool.key != "patch"
+                        else "Scan a folder and select at least one patch first.", "warn", 6000)
             return
         if tool.export:
             self._org_export(key, picks)

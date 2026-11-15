@@ -171,8 +171,8 @@ class _FillVeil(QWidget):
         self._out_timer.setSingleShot(True)
         self._out_timer.timeout.connect(self._fade_out)
         self._phase = 0.0
-        self._ripple_timer = QTimer(self)  # the water's ripple, the same as on the update screen's filling logo
-        self._ripple_timer.setInterval(33)
+        self._clock = motion.FrameClock()
+        self._ripple_timer = motion.frame_timer(self)  # the water's ripple, the same as on the update screen's filling logo
         self._ripple_timer.timeout.connect(self._ripple)
         self._regrab_timer = QTimer(self)
         self._regrab_timer.setSingleShot(True)
@@ -188,8 +188,9 @@ class _FillVeil(QWidget):
         self.update()
 
     def _ripple(self) -> None:
+        dt = self._clock.dt()
         if motion.on() and self.isVisible() and 0.0 < self._fill < 1.0:
-            self._phase = (self._phase + 0.08) % (2 * math.pi)
+            self._phase = (self._phase + 2.4 * dt) % (2 * math.pi)  # 2.4 radians a second: what 0.08 a frame was at 30 fps
             self.update()
 
     def _maybe_hide(self) -> None:
@@ -243,7 +244,8 @@ class _FillVeil(QWidget):
         self.setGeometry(self._card.rect())
         self.raise_()
         self.show()
-        self._ripple_timer.start()
+        self._clock.reset()
+        self._ripple_timer.start(motion.frame_ms(self))
         self._on_fill(frac)
         self._regrab()
         self._go(self._grey_anim, self._grey, 1.0, 260)

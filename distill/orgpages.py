@@ -84,8 +84,8 @@ ORG_TOOLS: dict[str, OrgTool] = {t.key: t for t in (
             "The original ROM is never changed.", ("Game", "Patches"), "Apply Selected Patches",
             "No games with patches found.", find_patch_games,
             (("stack", "switch", "Multiple patches", False, "Separate copies", "Stacked",
-              "Separate copies:  one patched copy per ticked patch, e.g. Game (Translation).gba and Game (Bugfix).gba\n\n"
-              "Stacked:  the ticked patches are applied in the order listed into one copy, "
+              "Separate copies:  one patched copy per selected patch, e.g. Game (Translation).gba and Game (Bugfix).gba\n\n"
+              "Stacked:  the selected patches are applied in the order listed into one copy, "
               "e.g. Game (Translation + Bugfix).gba"),
              ("show_all", "check", "Include games with no patch", False))),
     OrgTool("tidy", "Tidy filenames", "Tidy filenames",
@@ -101,7 +101,7 @@ ORG_TOOLS: dict[str, OrgTool] = {t.key: t for t in (
             "Move each multi-disc game's discs into a folder of their own, with an .m3u playlist.",
             ("Game  ->  folder", "Discs"), "Organise Selected Games",
             "No multi-disc games found that still need organizing.", find_multidisc,
-            (("loose", "check", "Also pair discs with similar names (left unticked for you to check)", False),
+            (("loose", "check", "Also pair discs with similar names (left deselected for you to check)", False),
              ("only_missing", "check", "Only list games with a missing disc (e.g. Disc 1 and Disc 3, no Disc 2)", False))),
     OrgTool("playlists", "Playlist repair", "Playlist repair",
             "Fix .m3u playlists that point to renamed, converted or moved discs.",
@@ -129,7 +129,7 @@ ORG_TOOLS: dict[str, OrgTool] = {t.key: t for t in (
              ("biosdir", "folder", "BIOS folder", "", "Blank = the scanned folder"))),
     OrgTool("report", "Library report", "Library report",
             "List every game with its system, format, region, size and folder, then save it as a web page or "
-            "spreadsheet. Untick a system to leave it out.",
+            "spreadsheet. Deselect a system to leave it out.",
             ("System", "Files"), "Save Report...", "No games found.", find_library, export=True),
 )}
 
@@ -157,7 +157,7 @@ ORG_PAGES: tuple[OrgPage, ...] = (
             (ORG_TOOLS["tidy"], ORG_TOOLS["multi"], ORG_TOOLS["playlists"], ORG_TOOLS["discfix"])),
     OrgPage("extras", "Remove Extras / Junk", "Remove Extras & Junk",
             "Use this to free space. One step at a time, in order: leftovers, duplicate games, extra releases. "
-            "Nothing is removed until you tick it and confirm.",
+            "Nothing is removed until you select it and confirm.",
             (ORG_TOOLS["cleanup"], ORG_TOOLS["dupes"], ORG_TOOLS["onegr"])),
     OrgPage("patch", "Patch ROMs", "Patch ROMs",
             ORG_TOOLS["patch"].blurb, (ORG_TOOLS["patch"],)),
@@ -179,7 +179,7 @@ def scan_page(page: OrgPage, root: Path, recursive: bool, opts: dict,
     wanted = opts.get("_steps")
     steps = [t for t in page.steps if wanted is None or t.key in wanted]
     if not steps:
-        return [], "Tick at least one step to scan.", page.steps[0].key
+        return [], "Select at least one step to scan.", page.steps[0].key
     skipped: list[str] = []
     message = ""
     for step in steps:

@@ -23,12 +23,14 @@ import posixpath
 import re
 import threading
 import time
+import urllib.error
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
 from .constants import APP_DIR
+from .netrules import RULES
 from .downloads import ARCHIVE_URL, describe_error, http_open, LinkError, parse_archive_url, RemoteFile
 from .formats import associated_files
 from .organize import ANY_TAG_RE, DISC_RE as DISC_MARKER_RE, ROMAN_RE, parse_disc, title_core
@@ -81,6 +83,7 @@ class Track:
     sub: str = ""  # folder inside the album ("CD1/"), kept so multi-disc releases stay apart
     lossless: bool = False
     disc: int | None = None  # which disc, when the name or tags say so and no folder already does
+    seconds: int | None = None  # its length, when the source lists it
 
 
 @dataclass(eq=False, slots=True)
@@ -350,7 +353,7 @@ def layout(game: str, tracks: list[Track], folder: str = SOUNDTRACK_FOLDER) -> l
         for pos, t in enumerate(group, 1):
             number = t.number if t.number is not None else pos
             name = _unique(f"{number:0{width}d} - {safe_name(t.title)}{t.ext}", used)
-            files.append(RemoteFile(f"{base}/{folder_part}{name}", t.url, t.size, "", t.md5))
+            files.append(RemoteFile(f"{base}/{folder_part}{name}", t.url, t.size, "", t.md5, seconds=t.seconds))
     return files
 
 
@@ -430,6 +433,81 @@ def pick_cover(files: Iterable[tuple[str, int | None]]) -> str | None:
         if best is None or (rank, name) < best:
             best = (rank, name)
     return best[1] if best else None
+
+
+# khinsider's lists (Top 40, the Top 100s, the home page, search) show each album's tiny `thumbs_small` picture. The same file is kept at
+# a medium size in `thumbs` (what an album's own page shows) and in full with no folder at all, so a list's cover can be fetched sharper.
+_KHI_THUMB = re.compile(r"^(?P<base>https?://[^?#]+/soundtracks/[^/?#]+)/(?P<dir>thumbs_small|thumbs)/(?P<file>[^/?#]+)(?P<tail>[?#].*)?$", re.IGNORECASE)
+
+
+class CoverTooBig(Exception):
+    """A cover bigger than the most worth fetching (see COVER_MAX_BYTES)."""
+
+
+def cover_candidates(url: str) -> list[str]:
+    """The addresses to try for a cover, sharpest first, ending with `url` itself. A khinsider list's `thumbs_small` picture is tried as the
+    full picture, then as the medium `thumbs` one; any other address (archive.org, a file on this computer, a picture that is already
+    full-size) is just itself."""
+    if not url:
+        return []
+    m = _KHI_THUMB.match(url)
+    if not m:
+        return [url]
+    base, folder, name, tail = m["base"], m["dir"].lower(), m["file"], m["tail"] or ""
+    out = [f"{base}/{name}{tail}"]
+    if folder == "thumbs_small":
+        out.append(f"{base}/thumbs/{name}{tail}")
+    out.append(url)
+    return out
+
+
+def image_mime(data: bytes) -> str:
+    """The picture type of `data` by its first bytes ('' when it is not a picture Distill knows)."""
+    if data[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"GIF8":
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def read_cover(url: str, limit: int = COVER_MAX_BYTES) -> bytes:
+    """One cover's bytes: from the net or from a file on this computer. CoverTooBig when it is bigger than `limit` (a big one is refused
+    from its header, before it is downloaded)."""
+    if is_local_path(url):
+        data = Path(url).read_bytes()
+    else:
+        with http_open(url, timeout=15) as resp:
+            size = str(resp.headers.get("Content-Length") or "")
+            if size.isdigit() and int(size) > limit:
+                raise CoverTooBig(url)
+            data = resp.read(limit + 1)
+    if len(data) > limit:
+        raise CoverTooBig(url)
+    return data
+
+
+def fetch_cover(url: str, limit: int = COVER_MAX_BYTES, reader: Callable[[str, int], bytes] | None = None) -> bytes:
+    """The sharpest cover that can be had for `url` (see cover_candidates). A sharper address that is missing, too big or not a picture is
+    passed over for the next; the address that was given is read as it always was. b"" when it is too big; any other failure is raised."""
+    reader = reader or read_cover
+    tries = cover_candidates(url)
+    for i, address in enumerate(tries):
+        if i == len(tries) - 1:
+            try:
+                return reader(address, limit)
+            except CoverTooBig:
+                return b""
+        try:
+            data = reader(address, limit)
+        except Exception:  # (not there, not allowed, too big: the next one down)
+            continue
+        if image_mime(data):
+            return data
+    return b""
 
 
 def archive_art_url(identifier: str) -> str:
@@ -524,7 +602,7 @@ class ArchiveOrgProvider:
                 size = None
             url = f"{ARCHIVE_URL}/download/{quoted}/{urllib.parse.quote(str(f['name']), safe='/')}"
             tracks.append(Track(url, ext, title, number, size, f.get("md5"), (sub + "/") if sub else "",
-                                ext in LOSSLESS, disc))
+                                ext in LOSSLESS, disc, to_seconds(f.get("length"))))
         if not tracks:
             raise LinkError(f"{album.ident}: no audio files found in it")
         sizes = []
@@ -539,6 +617,42 @@ class ArchiveOrgProvider:
         return tracks
 
 
+def to_seconds(value) -> int | None:
+    """A length as sources write it ('215.42', '3:35', 215) in whole seconds; None when it is not one."""
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    try:
+        if ":" in text:
+            total = 0
+            for part in text.split(":"):
+                total = total * 60 + int(float(part))
+            return total or None
+        return int(round(float(text))) or None
+    except ValueError:
+        return None
+
+
+def fmt_clock(seconds: int | None) -> str:
+    """3:05 or 1:02:03; blank when unknown."""
+    if not seconds or seconds < 0:
+        return ""
+    h, rest = divmod(int(seconds), 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def fmt_total(seconds: int | None) -> str:
+    """'1 h 19 min', '13 min 54 s' or ''."""
+    if not seconds or seconds < 0:
+        return ""
+    h, rest = divmod(int(seconds), 3600)
+    m, s = divmod(rest, 60)
+    if h:
+        return f"{h} h {m} min"
+    return f"{m} min {s} s" if m else f"{s} s"
+
+
 # --- khinsider -------------------------------------------------------------------------------------------
 KHI_HOST = "downloads.khinsider.com"
 KHI_URL = "https://" + KHI_HOST
@@ -548,14 +662,132 @@ _KHI_SIZE = re.compile(r"^\s*([\d.,]+)\s*(KB|MB|GB)\s*$", re.IGNORECASE)
 _KHI_TIME = re.compile(r"^\s*(?:(\d+):)?(\d{1,2}):(\d{2})\s*$")
 
 
+# khinsider turned away the app's own User-Agent with HTTP 403 (reported from a real run), so its pages are asked for
+# the way a browser asks. A rule the person has set for the host (Settings > network rules) wins over these.
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": KHI_URL + "/",
+}
+
+
+def khinsider_headers(url: str) -> dict[str, str]:
+    """Browser-like headers for khinsider addresses (pages and covers); nothing for any other site."""
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if host != KHI_HOST and not host.endswith(".khinsider.com"):
+        return {}
+    return {k: v for k, v in BROWSER_HEADERS.items() if k not in RULES.headers_for(url)}
+
+
+class ChallengeError(LinkError):
+    """khinsider answered with a Cloudflare 'Just a moment...' check, which only a real browser can pass."""
+
+
+CHALLENGE_COOLDOWN = 300.0  # seconds khinsider is left alone after a refusal: asking again at once only repeats it
+_KHI_BLOCK = {"until": 0.0}
+_CHALLENGE_TEXT = "just a moment"
+CHALLENGE_MESSAGE = ("khinsider is behind a Cloudflare check that plain Python cannot pass. Install the optional "
+                     "'curl_cffi' package (pip install curl_cffi) and restart Distill to get past it. Until then "
+                     "khinsider is skipped and archive.org is searched.")
+CHALLENGE_STILL_MESSAGE = ("khinsider still refused Distill with a browser-like connection (Cloudflare check), so it is "
+                           "skipped for a few minutes. archive.org is still searched.")
+
+
+def is_challenge(headers, body: bytes | str = b"") -> bool:
+    """A Cloudflare managed-challenge response: its header says so, or the page is the 'Just a moment...' one."""
+    try:
+        if str(headers.get("cf-mitigated", "")).lower() == "challenge":
+            return True
+    except AttributeError:
+        pass
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
+    return _CHALLENGE_TEXT in text[:4000].lower() and "cloudflare" in text.lower()
+
+
+_CFFI_LOCAL = threading.local()
+
+
+def _cffi_session():
+    """A Chrome-impersonating HTTP session (one per thread), or None when the optional `curl_cffi` package is not
+    installed. Cloudflare's check turns plain Python away by the way it connects (its TLS fingerprint); this connects
+    the way Chrome does."""
+    session = getattr(_CFFI_LOCAL, "session", None)
+    if session is not None:
+        return session
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        return None
+    session = cffi_requests.Session(impersonate="chrome")
+    _CFFI_LOCAL.session = session
+    return session
+
+
+def curl_cffi_available() -> bool:
+    return _cffi_session() is not None
+
+
+def _fetch_via_cffi(session, url: str, timeout: float) -> str:
+    # The browser identity comes from `impersonate`; only a rule the person set for the host is added to it.
+    try:
+        resp = session.get(url, headers=dict(RULES.headers_for(url)) or None, timeout=timeout)
+        body = resp.content[:6_000_000]
+        status, headers = resp.status_code, resp.headers
+    except Exception as exc:  # noqa: BLE001 - curl_cffi raises its own error types
+        raise LinkError(f"khinsider: {exc}") from exc
+    if is_challenge(headers, body[:8000]):
+        _KHI_BLOCK["until"] = time.time() + CHALLENGE_COOLDOWN
+        raise ChallengeError(CHALLENGE_STILL_MESSAGE)
+    if status == 403:
+        raise LinkError("khinsider refused the request (HTTP 403)")
+    if status == 429:
+        raise LinkError("khinsider is rate limiting requests (HTTP 429): wait a bit and try again")
+    if status >= 400:
+        raise LinkError(f"khinsider: HTTP {status}")
+    return body.decode("utf-8", errors="replace")
+
+
+def khinsider_wait_seconds() -> int:
+    """How long khinsider is being left alone after a refusal (0 when it is not)."""
+    return max(0, int(_KHI_BLOCK["until"] - time.time() + 0.999))
+
+
+def reset_khinsider_block() -> None:
+    """Ask khinsider again at once (after the person has added a cookie rule, say)."""
+    _KHI_BLOCK["until"] = 0.0
+
+
 def fetch_text(url: str, timeout: float = 30) -> str:
     """GET a page as text. LinkError (with a readable message) on any network problem."""
+    khi = bool(khinsider_headers(url))
+    if khi and time.time() < _KHI_BLOCK["until"]:
+        raise ChallengeError(CHALLENGE_MESSAGE if _cffi_session() is None else CHALLENGE_STILL_MESSAGE)
+    if khi and (session := _cffi_session()) is not None:
+        return _fetch_via_cffi(session, url, timeout)
     try:
-        with http_open(url, timeout=timeout) as resp:
+        with http_open(url, headers=khinsider_headers(url) or None, timeout=timeout) as resp:
             raw = resp.read(6_000_000)
             charset = resp.headers.get_content_charset() or "utf-8"
+    except urllib.error.HTTPError as exc:
+        body = b""
+        if exc.code == 403 and khi:
+            try:
+                body = exc.read(8000)
+            except Exception:  # noqa: BLE001
+                pass
+            if is_challenge(exc.headers or {}, body):
+                _KHI_BLOCK["until"] = time.time() + CHALLENGE_COOLDOWN
+                raise ChallengeError(CHALLENGE_MESSAGE) from exc
+            raise LinkError("khinsider refused the request (HTTP 403)") from exc
+        if exc.code == 429:
+            raise LinkError("khinsider is rate limiting requests (HTTP 429): wait a bit and try again") from exc
+        raise LinkError(describe_error(exc)) from exc
     except (OSError, http.client.HTTPException, ValueError) as exc:
         raise LinkError(describe_error(exc)) from exc
+    if khi and is_challenge({}, raw[:4000]):  # a challenge page served with a 200
+        _KHI_BLOCK["until"] = time.time() + CHALLENGE_COOLDOWN
+        raise ChallengeError(CHALLENGE_MESSAGE)
     return raw.decode(charset, errors="replace")
 
 
@@ -697,23 +929,87 @@ def parse_khinsider_album(page: str, slug: str, prefer: str = "best") -> tuple[l
             has_flac = True
         mp3 = sizes[0] if sizes else None
         flac = sizes[1] if len(sizes) > 1 else None
+        seconds = next((sec for t in texts if (sec := _khi_seconds(t)) is not None), None)
         use_flac = has_flac and prefer != "mp3"
         disc, number = (nums[0], nums[1]) if len(nums) >= 2 else (None, nums[0] if nums else None)
         ext = ".flac" if use_flac else ".mp3"
         tracks.append(Track(_khi_abs(song[0], base + "/"), ext, title, number, flac if use_flac else mp3, None, "",
-                            use_flac, disc))
+                            use_flac, disc, seconds))
     cover = ""
     if m := re.search(r'class="albumImage"[^>]*>.*?<a[^>]+href="([^"]+)"', page, re.DOTALL | re.IGNORECASE):
         cover = _khi_abs(m[1])
     elif m := re.search(r'class="albumImage"[^>]*>.*?<img[^>]+src="([^"]+)"', page, re.DOTALL | re.IGNORECASE):
         cover = _khi_abs(m[1])
-    info = {"title": "", "year": "", "platforms": ""}
-    if m := re.search(r"<h2[^>]*>(.*?)</h2>", page, re.DOTALL | re.IGNORECASE):
+    info = {"title": "", "year": "", "platforms": "", "publisher": "", "type": "", "added": "", "related": []}
+    start = re.search(r'id="pageContent"', page, re.IGNORECASE)  # the album's own heading, not one in the site's menus
+    content = page[start.start():] if start else page
+    if m := re.search(r"<h2[^>]*>(.*?)</h2>", content, re.DOTALL | re.IGNORECASE):
         info["title"] = html.unescape(re.sub(r"<[^>]+>", "", m[1])).strip()
-    for key, label in (("year", "Year"), ("platforms", "Platforms?")):
-        if m := re.search(label + r":\s*(?:<[^>]*>\s*)*([^<\n]+)", page, re.IGNORECASE):
-            info[key] = html.unescape(m[1]).strip()
+    if block := re.search(r'<p align="left">(.*?)</p>', content, re.DOTALL | re.IGNORECASE):
+        meta = block[1]
+        if m := re.search(r"Platforms?:(.*?)<br", meta, re.DOTALL | re.IGNORECASE):
+            names = re.findall(r"<a[^>]*>(.*?)</a>", m[1], re.DOTALL)
+            info["platforms"] = ", ".join(html.unescape(n).strip() for n in names) or html.unescape(re.sub(r"<[^>]+>", "", m[1])).strip()
+        for key, pattern in (("year", r"Year:\s*<b>\s*(\d{4})"), ("publisher", r"Published by:\s*<a[^>]*>(.*?)</a>"),
+                             ("type", r"Album type:\s*<b>\s*(?:<a[^>]*>)?(.*?)(?:</a>)?\s*</b>"),
+                             ("added", r"Date Added:\s*<b>(.*?)</b>")):
+            if m := re.search(pattern, meta, re.DOTALL | re.IGNORECASE):
+                info[key] = html.unescape(re.sub(r"<[^>]+>", "", m[1])).strip()
+    info["related"] = parse_khinsider_tiles(page, after="People who viewed this also viewed")
     return tracks, cover, info
+
+
+_TILE = re.compile(r'<td class="albumIconLarge">(.*?)</td>', re.DOTALL | re.IGNORECASE)
+
+
+def parse_khinsider_tiles(page: str, after: str = "") -> list[dict]:
+    """[{slug, title, art}] from the cover tiles khinsider shows under 'Top 12 Albums' and 'People who viewed this also
+    viewed'. `after`: only the tiles after this heading text."""
+    if after:
+        at = page.find(after)
+        if at < 0:
+            return []
+        page = page[at:]
+    out, seen = [], set()
+    for tile in _TILE.findall(page):
+        link = re.search(r'href="[^"]*?/game-soundtracks/album/([^"/?#]+)"', tile)
+        if not link or link[1] in seen:
+            continue
+        seen.add(link[1])
+        img = re.search(r'<img[^>]+src="([^"]+)"', tile)
+        label = re.search(r"<p>(.*?)</p>", tile, re.DOTALL)
+        title = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", label[1] if label else ""))).strip()
+        out.append({"slug": link[1], "title": title, "art": _khi_abs(img[1]) if img else ""})
+    return out
+
+
+def parse_khinsider_toplist(page: str) -> list[dict]:
+    """[{rank, slug, title, art}] from a ranked list (/top40, /all-time-top-1000, ...): table#top40."""
+    out = []
+    for table in _read_tables(page):
+        if table["id"] != "top40":
+            continue
+        for row in table["rows"]:
+            link = next(((h, t) for cell in row for h, t in cell["links"] if _KHI_ALBUM_PATH in h and "".join(t).strip()), None)
+            if link is None:
+                continue
+            rank = next((int(t.rstrip(".")) for t in (_cell_text(c) for c in row) if re.fullmatch(r"\d{1,5}\.?", t)), len(out) + 1)
+            art = next((src for cell in row for src in cell["imgs"]), "")
+            out.append({"rank": rank, "slug": urllib.parse.urlsplit(link[0]).path.rstrip("/").rpartition("/")[2],
+                        "title": html.unescape("".join(link[1])).strip(), "art": _khi_abs(art) if art else ""})
+    return out
+
+
+def parse_khinsider_pages(page: str) -> tuple[int, int]:
+    """(this page, how many pages) from the 'Page 1 of 620' counter; (1, 1) when there is none."""
+    m = re.search(r"Page\s+(\d+)\s+of\s+(\d+)", page)
+    return (int(m[1]), int(m[2])) if m else (1, 1)
+
+
+def parse_khinsider_consoles(page: str) -> list[tuple[str, str, int]]:
+    """(slug, name, album count) of every platform on /console-list."""
+    return [(m[1], html.unescape(m[2]).strip(), int(m[3])) for m in
+            re.finditer(r'<a href="/game-soundtracks/([a-z0-9-]+)">([^<]+)</a>\s*\((\d+)\)', page)]
 
 
 _KHI_FILE_LINK = re.compile(r'(?:href|src)="(https?://[^"]+?\.(?:flac|mp3|m4a|ogg|opus|wav)(?:\?[^"]*)?)"', re.IGNORECASE)
@@ -784,6 +1080,17 @@ def resolve_files(files: list[RemoteFile], prefer: str = "best", workers: int = 
     return out, problems
 
 
+def snapshot_for_quality(tracks: list[Track], prefer: str) -> list[Track] | None:
+    """A saved track list is kept in Best form. For MP3 only, khinsider tracks are turned into MP3 ones (the file
+    address is looked up at play time, so only the label and size change); a list from anywhere else cannot be turned
+    and None says to list the album afresh."""
+    if prefer != "mp3":
+        return tracks
+    if not tracks or not all(is_khinsider_page(t.url) for t in tracks):
+        return None
+    return [dataclasses.replace(t, ext=".mp3", lossless=False, size=None) for t in tracks]
+
+
 class KHInsiderProvider:
     name = "khinsider"
 
@@ -806,8 +1113,217 @@ class KHInsiderProvider:
         if cover:
             album.art = cover
         if not album.detail:
-            album.detail = " \u00b7 ".join(x for x in (info["platforms"], info["year"]) if x)
+            album.detail = " \u00b7 ".join(x for x in (info["platforms"], info["type"], info["year"]) if x)
         album.cache[prefer] = tracks
+        album.cache["info"] = info  # publisher, type, date added, and the 'also viewed' albums
+        return tracks
+
+    # ---- browsing (the Media page's Home tab) ----
+    LISTS = {"top40": ("Top 40 this week", "/top40"), "newly": ("Top 100 newly added", "/top-100-newly-added"),
+             "recent": ("Top 100 of the last 6 months", "/last-6-months-top-100"),
+             "alltime": ("All-time top 1000", "/all-time-top-1000")}
+
+    def ranked(self, kind: str, page: int = 1) -> tuple[list[Album], int]:
+        # (named 'ranked', not 'top': Python's symtable treats a scope called 'top' as the module, which fools the
+        # static-names test)
+        """(albums, pages) of one ranked list, best first."""
+        path = self.LISTS[kind][1] + (f"?page={page}" if page > 1 else "")
+        text = fetch_text(KHI_URL + path)
+        albums = [Album(self.name, d["slug"], d["title"], "", 1.0, d["art"]) for d in parse_khinsider_toplist(text)]
+        return albums, parse_khinsider_pages(text)[1]
+
+    def latest(self, page: int = 1) -> tuple[list[Album], int]:
+        """(albums, pages) of the newest uploads, newest first."""
+        return self.browse("/", page)
+
+    def browse(self, path: str, page: int = 1) -> tuple[list[Album], int]:
+        """(albums, pages) of a list page: the home page, a platform, a year, a publisher or a letter."""
+        sep = "&" if "?" in path else "?"
+        text = fetch_text(KHI_URL + path + (f"{sep}page={page}" if page > 1 else ""))
+        albums = [Album(self.name, d["slug"], d["title"], d["detail"], 1.0, d["art"]) for d in parse_khinsider_search(text)]
+        return albums, parse_khinsider_pages(text)[1]
+
+    def consoles(self) -> list[tuple[str, str, int]]:
+        """(slug, name, album count) of every platform khinsider has, from its console list."""
+        return parse_khinsider_consoles(fetch_text(KHI_URL + "/console-list"))
+
+    def related(self, album: Album) -> list[Album]:
+        """Albums people who viewed this one also viewed (from its page; listed once and kept)."""
+        if "info" not in album.cache:
+            self.tracks(album)
+        return [Album(self.name, d["slug"], d["title"], "", 1.0, d["art"]) for d in album.cache["info"]["related"]]
+
+
+# --- matching an album to a game's platform and year -------------------------------------------------------
+_GENERIC_PLATFORM_WORDS = frozenset({"nintendo", "sony", "sega", "microsoft", "entertainment", "system", "console", "the",
+                                     "video", "game", "computer"})
+_PLATFORM_ALIASES = (  # (what the name contains, what it stands for)
+    ("super nintendo", "snes"), ("super famicom", "snes"), ("super nes", "snes"),
+    ("nintendo entertainment system", "nes"), ("famicom", "nes"),
+    ("mega drive", "genesis"), ("megadrive", "genesis"), ("sega genesis", "genesis"),
+    ("game boy advance", "gba"), ("gameboy advance", "gba"), ("game boy color", "gbc"), ("game boy", "gb"),
+    ("gamecube", "gamecube"), ("game cube", "gamecube"),
+    ("playstation portable", "psp"), ("playstation vita", "vita"), ("psx", "playstation"), ("ps1", "playstation"),
+    ("ps2", "playstation 2"), ("ps3", "playstation 3"), ("ps4", "playstation 4"), ("ps5", "playstation 5"),
+    ("playstation one", "playstation"), ("nintendo switch", "switch"), ("microsoft windows", "pc"), ("windows", "pc"),
+)
+PLATFORM_BONUS = 0.10  # added to the match score when the album is for the game's platform
+YEAR_BONUS = 0.05  # ... and when its year is within a year of the game's
+
+
+def platform_tokens(name: str) -> frozenset[str]:
+    """The words that say which platform this is: 'Sony PlayStation 4' and 'PS4' both give {playstation, 4}."""
+    low = re.sub(r"[^a-z0-9 ]+", " ", (name or "").lower())
+    low = f" {re.sub(r'  +', ' ', low).strip()} "
+    for text, stands_for in _PLATFORM_ALIASES:
+        low = low.replace(f" {text} ", f" {stands_for} ")
+    return frozenset(w for w in low.split() if w not in _GENERIC_PLATFORM_WORDS)
+
+
+def same_platform(a: str, b: str) -> bool:
+    ta, tb = platform_tokens(a), platform_tokens(b)
+    if not ta or not tb:
+        return False
+    nums_a, nums_b = {w for w in ta if w.isdigit()}, {w for w in tb if w.isdigit()}
+    if nums_a and nums_b and nums_a != nums_b:  # PlayStation 2 is not PlayStation 4
+        return False
+    return bool((ta - nums_a) & (tb - nums_b)) or (ta == tb)
+
+
+def split_detail(detail: str) -> tuple[str, int]:
+    """(platform, year) out of an album's detail line ('PS3, PS4 \u00b7 Arrangement \u00b7 2020'). The platform keeps
+    its commas when the album is for several."""
+    parts = [p.strip() for p in (detail or "").split("\u00b7") if p.strip()]
+    year = next((int(p) for p in parts if re.fullmatch(r"(?:19|20)\d\d", p)), 0)
+    platform = next((p for p in parts if not re.fullmatch(r"(?:19|20)\d\d", p)), "")
+    return platform, year
+
+
+def rank_for_game(albums: list[Album], platform: str = "", year: str | int = "") -> list[Album]:
+    """The same albums with the ones for the game's platform (and release year) moved up. Only a small bonus, so a
+    better title match on another platform still wins over a poor one on the right platform."""
+    try:
+        want_year = int(year)
+    except (TypeError, ValueError):
+        want_year = 0
+    if not platform and not want_year:
+        return list(albums)
+
+    def key(a: Album) -> float:
+        album_platform, album_year = split_detail(a.detail)
+        listed = [p.strip() for p in album_platform.split(",") if p.strip()]
+        bonus = PLATFORM_BONUS if platform and any(same_platform(platform, p) for p in listed) else 0.0
+        if want_year and album_year and abs(album_year - want_year) <= 1:
+            bonus += YEAR_BONUS
+        return a.score + bonus
+
+    return sorted(albums, key=key, reverse=True)
+
+
+_MERGE_NOISE = frozenset({"original", "soundtrack", "ost", "game", "music", "official", "complete", "the", "of", "video"})
+
+
+def album_merge_key(title: str) -> str:
+    """Titles that name the same release collapse to one key ('Celeste Original Soundtrack' and 'Celeste' match)."""
+    words = [w for w in re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).split() if w not in _MERGE_NOISE]
+    return " ".join(words)
+
+
+# --- albums saved on disk ---------------------------------------------------------------------------------
+AUDIO_EXTS = frozenset({".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac"})
+LOCAL_SOURCE = "local"
+_LOCAL_COVER_NAMES = ("cover.jpg", "cover.jpeg", "cover.png", "folder.jpg")
+_DISC_FOLDER = re.compile(r"(?:cd|dis[ck])\s*0*(\d+)", re.IGNORECASE)
+
+
+def is_local_path(url: str) -> bool:
+    """A file on this computer rather than an address on the net."""
+    return bool(url) and not url.lower().startswith(("http://", "https://"))
+
+
+def _audio_files(folder: Path, depth: int = 2) -> list[Path]:
+    found: list[Path] = []
+    try:
+        for entry in sorted(folder.iterdir(), key=lambda p: p.name.casefold()):
+            if entry.is_file() and entry.suffix.lower() in AUDIO_EXTS:
+                found.append(entry)
+            elif entry.is_dir() and depth > 0:
+                found += _audio_files(entry, depth - 1)
+    except OSError:
+        pass
+    return found
+
+
+def _local_album(folder: Path, title: str) -> Album | None:
+    files = _audio_files(folder)
+    if not files:
+        return None
+    art = next((str(folder / n) for n in _LOCAL_COVER_NAMES if (folder / n).is_file()), "")
+    album = Album(LOCAL_SOURCE, str(folder), title, "", 1.0, art)
+    album.playable = len(files)
+    return album
+
+
+def scan_local_albums(standard_dir: Path | None, games_dir: Path | None = None, max_depth: int = 4) -> list[Album]:
+    """Albums already saved: each folder of <standard_dir>/Soundtracks, and each 'soundtrack' folder under the games
+    directory (named for its game). Albums are listed by title."""
+    seen: set[str] = set()
+    albums: list[Album] = []
+
+    def add(folder: Path, title: str) -> None:
+        key = str(folder.resolve()).casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        if album := _local_album(folder, title):
+            albums.append(album)
+
+    if standard_dir is not None:
+        root = standard_dir / STANDARD_ROOT
+        try:
+            for child in sorted(root.iterdir(), key=lambda p: p.name.casefold()):
+                if child.is_dir():
+                    add(child, child.name)
+        except OSError:
+            pass
+    if games_dir is not None and games_dir.is_dir():
+        def walk(folder: Path, depth: int) -> None:
+            try:
+                children = [c for c in folder.iterdir() if c.is_dir()]
+            except OSError:
+                return
+            for child in children:
+                if child.name.casefold() == SOUNDTRACK_FOLDER:
+                    add(child, folder.name)
+                elif depth < max_depth:
+                    walk(child, depth + 1)
+        walk(games_dir, 1)
+    albums.sort(key=lambda a: a.title.casefold())
+    return albums
+
+
+class LocalProvider:
+    """Albums saved on disk. They are found by `scan_local_albums`, never by a search."""
+    name = LOCAL_SOURCE
+
+    def search(self, game: str) -> list[Album]:
+        return []
+
+    def tracks(self, album: Album, prefer: str = "best") -> list[Track]:
+        folder = Path(album.ident)
+        files = _audio_files(folder)
+        if not files:
+            raise LinkError(f"{album.title}: no audio files in {folder}")
+        tracks = []
+        for path in files:
+            number, title = tidy_title(path.stem)
+            disc_match = _DISC_FOLDER.search(path.parent.name) if path.parent != folder else None
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
+            tracks.append(Track(str(path), path.suffix.lower(), title, number, size, None, "",
+                                path.suffix.lower() == ".flac", int(disc_match[1]) if disc_match else None))
         return tracks
 
 
@@ -955,6 +1471,37 @@ def _albums_from_json(rows: list) -> list[Album]:
     return out
 
 
+def m3u_text(entries: list[tuple[str, int | None, str]]) -> str:
+    """An extended M3U playlist from (display title, length in seconds, file path or address) entries."""
+    out = ["#EXTM3U"]
+    for title, seconds, location in entries:
+        clean = " ".join(str(title).split())
+        out.append(f"#EXTINF:{seconds if seconds else -1},{clean}")
+        out.append(location)
+    return "\n".join(out) + "\n"
+
+
+def browse_path(kind: str, value: str) -> str:
+    """The khinsider list page for a platform ('nintendo-switch'), a year ('2016') or a letter ('A', or '0-9')."""
+    if kind == "platform":
+        return f"/game-soundtracks/{urllib.parse.quote(value, safe='-')}"
+    if kind == "year":
+        return f"/game-soundtracks/year/{int(value)}"
+    if kind == "letter":
+        return f"/game-soundtracks/browse/{'0-9' if value in ('0-9', '#') else value.upper()[:1]}"
+    raise ValueError(kind)
+
+
+def related_albums(album: Album) -> list[Album]:
+    """Albums people who viewed this one also viewed: khinsider's own list, read from its page. Empty for any other source."""
+    if album.provider != KHInsiderProvider.name:
+        return []
+    try:
+        return KHInsiderProvider().related(album)
+    except LinkError:
+        return []
+
+
 def find_albums(requests: list[GameRequest], providers=DEFAULT_PROVIDERS,
                 on_result: Callable[[int, GameResult], None] | None = None,
                 should_stop: Callable[[], bool] | None = None, pause: float = 0.4,
@@ -989,9 +1536,9 @@ def find_albums(requests: list[GameRequest], providers=DEFAULT_PROVIDERS,
                 res.albums.sort(key=lambda a: a.score, reverse=True)
                 res.albums = [a for a in res.albums if a.score > 0]
                 res.albums = _rank_playable(res.albums, providers)
-                if not res.albums and problems:
+                if problems:  # said even when another source did find albums: the person should know one is missing
                     res.error = "; ".join(problems)
-                elif res.albums:
+                if res.albums and not problems:  # a partial answer is not kept: the missing source gets asked again
                     cache[key] = {"t": time.time(), "albums": _albums_to_json(res.albums)}
                     dirty = True
         results.append(res)
@@ -1009,6 +1556,8 @@ def files_for(game: str, album: Album, providers=DEFAULT_PROVIDERS, prefer: str 
     """The download-ready file list for one chosen album: `<Game>/Soundtrack/NN - Title.ext`."""
     if album.provider == LinkProvider.name:
         provider: Provider = LinkProvider()
+    elif album.provider == LOCAL_SOURCE:
+        provider = LocalProvider()  # type: ignore[assignment]
     else:
         provider = next((p for p in providers if p.name == album.provider), None)  # type: ignore[assignment]
         if provider is None:

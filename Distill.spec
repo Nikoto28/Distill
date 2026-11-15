@@ -33,6 +33,10 @@ def bundle(package, required):
 # (the DolphinTool and maxcso downloads) can't be unpacked inside the exe.
 for package in ("pybcj", "pyppmd", "pyzstd", "inflate64", "brotli", "Cryptodome", "multivolumefile", "texttable", "psutil"):
     bundle(package, required=False)  # not every py7zr version needs every one
+# curl_cffi (with cffi and certifi) connects the way Chrome does, which is how the Media page gets past KHInsider's
+# Cloudflare check. Without it in the build, only archive.org is searched there.
+for package in ("curl_cffi", "cffi", "certifi"):
+    bundle(package, required=False)
 for package in ("py7zr", "libtorrent", "mutagen"):  # the app degrades without these when run from source, but a release must have them
     bundle(package, required=True)
 
@@ -42,7 +46,7 @@ datas += [("distill/assets", "distill/assets")]  # the Inter, Outfit and JetBrai
 excludes = ["tkinter", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick",
             "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.Qt3DInput", "PySide6.Qt3DLogic", "PySide6.Qt3DAnimation",
             "PySide6.Qt3DExtras", "PySide6.QtQuick", "PySide6.QtQml", "PySide6.QtQuick3D",
-            "PySide6.QtMultimediaWidgets", "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtCharts",
+            "PySide6.QtMultimediaWidgets", "PySide6.QtPdfWidgets", "PySide6.QtCharts",
             "PySide6.QtDataVisualization", "PySide6.QtSql", "PySide6.QtBluetooth", "PySide6.QtNfc",
             "PySide6.QtPositioning", "PySide6.QtSensors", "PySide6.QtSerialPort", "PySide6.QtRemoteObjects"]
 
