@@ -637,6 +637,7 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
 
     def test_clicking_the_cover_opens_a_larger_preview(self):
         from PySide6.QtGui import QColor, QPixmap
+        from PySide6.QtWidgets import QLabel, QWidget
         from distill.ui import now_playing
 
         win = self.make_window()
@@ -651,7 +652,9 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
             np.set_art(pix)
             np.show_large_art()
         self.assertEqual(len(shown), 1)
-        self.assertGreater(shown[0].layout().itemAt(0).widget().pixmap().width(), 52)
+        # the cover is the label in the dialog's body (the title row has its own small icon label, which is not it)
+        cover = shown[0].findChild(QWidget, "framelessBody").findChild(QLabel)
+        self.assertGreater(cover.pixmap().width(), 52)
 
     def test_a_tool_path_the_person_chose_is_remembered_but_one_the_app_found_is_not(self):
         import tempfile
@@ -691,10 +694,10 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
             win = self.make_window()
             self.addCleanup(win.close)
             self.assertEqual([win.settings_list.item(i).text() for i in range(win.settings_list.count())],
-                             ["Tools", "Downloads", "API keys", "General"])
-            self.assertEqual(set(win.api_keys.edits), {"sgdb", "github", "ra_user", "ra"})
-            for name, edit in win.api_keys.edits.items():  # a user name isn't a secret; every key is hidden
-                want = QLineEdit.EchoMode.Normal if name == "ra_user" else QLineEdit.EchoMode.Password
+                             ["Tools", "Downloads", "API keys", "General", "Sidebar"])  # API keys still has a page of its own
+            self.assertEqual(set(win.api_keys.edits), {"sgdb", "github", "ra_user", "ra", "romm_url", "romm"})
+            for name, edit in win.api_keys.edits.items():  # a user name or a server's address isn't a secret; every key is hidden
+                want = QLineEdit.EchoMode.Normal if name in ("ra_user", "romm_url") else QLineEdit.EchoMode.Password
                 self.assertEqual(edit.echoMode(), want, name)
             panel = win.api_keys
             self.assertEqual([f.header.text() for f in (panel.games, panel.downloads, panel.updates)],
@@ -967,6 +970,14 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
         start, end = T.wash(70, 24)
         self.assertEqual((start.alpha(), end.alpha()), (70, 24))
         self.assertEqual(start.name(), T.accent.name())
+
+    def _scan_results(self, win, key: str, games: int, details: int = 2) -> None:
+        """Fill an Organise page's list the way a finished scan does: `games` findings, each with `details` rows under it."""
+        from distill.organize import Finding
+
+        win._show_page(key)
+        win._org_show(key, [Finding(f"Game {i}", "1", children=[(f"file {j}", "1", "x") for j in range(details)])
+                            for i in range(games)], "", "")
 
     def test_scan_results_ripple_in_and_their_details_fold_open(self):
         win = self._shown_window()
@@ -1496,15 +1507,20 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
         win.is_processing = True
         win._begin_run_label("chd")
         self.assertEqual(win.start_btn.text(), "Compressing...")
-        win._show_page("dl")  # moving to another page doesn't change what the running job's button says
+        win._show_page("ps3")  # moving to another tool page doesn't change what the running job's button says
         self.assertEqual(win.start_btn.text(), "Compressing...")
+        win._show_page("dl")  # the Download page speaks for the download run, which a conversion does not hold up
+        self.assertEqual(win.start_btn.text(), "Start Download")
         win.is_processing = False
         win._update_start_text()
         self.assertEqual(win.start_btn.text(), "Start Download")
-        win.is_processing = True
-        win._begin_run_label("dl")
+        win._dl_page, win._dl_label = "dl", win._busy_label("dl")  # a download run going, as _start_download leaves it
+        win.dl_runner = mock.Mock()
+        win._sync_run_controls()
         self.assertEqual(win.start_btn.text(), "Downloading...")
-        win.is_processing = False
+        win._show_page("chd")  # ... and a download going leaves a tool page's button alone
+        self.assertEqual(win.start_btn.text(), "Start CHD Compression")
+        win.dl_runner = None
         win._show_page("fix")
         win._org_set_busy(True, "Scanning...")
         self.assertEqual(win.start_btn.text(), "Scanning...")
@@ -1776,8 +1792,8 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
         import tempfile
         from pathlib import Path
 
-        from PySide6.QtCore import QBuffer, QEvent, QIODevice
-        from PySide6.QtGui import QColor, QImage
+        from PySide6.QtCore import QBuffer, QIODevice, QPointF
+        from PySide6.QtGui import QColor, QEnterEvent, QImage
 
         from distill import recomps as rcmod
 
@@ -1788,7 +1804,7 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
         win._rc_show_detail(mine.id)
         cover = win.rcd_cover
         self.assertTrue(cover.edit_btn.isHidden())  # out of sight until the pointer is over the poster
-        cover.enterEvent(QEvent(QEvent.Type.Enter))
+        cover.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))  # Qt 6 hands enterEvent a QEnterEvent, not a plain QEvent
         self.assertFalse(cover.edit_btn.isHidden())
         self.assertGreater(cover.edit_btn.x(), cover.width() // 2)  # bottom right
         self.assertGreater(cover.edit_btn.y(), cover.height() // 2)
@@ -1819,7 +1835,9 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
         self.assertNotIn("**", shown)
         self.assertFalse(box.details.isHidden())
         self.assertEqual(box.details_btn.text(), "Hide release notes")
+        box.show()  # exec() has the box on screen by the time its button can be pressed; folding asks what is showing
         box.details_btn.click()
+        self.assertTrue(box.details.isHidden())
         self.assertEqual(box.details_btn.text(), "Show release notes")
 
     def test_games_page_lists_platforms_opens_a_game_and_plays_it_with_retroarch(self):
@@ -1828,6 +1846,7 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
         from types import SimpleNamespace
 
         from distill import games as gm
+        from distill.ui.games_widgets import COUNT_ROLE
         from distill.ui.recomp_page import ID_ROLE
 
         tmp = tempfile.TemporaryDirectory()
@@ -1854,7 +1873,8 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
             win._gm_reload()
             rail = [win.gm_rail.item(i).text() for i in range(win.gm_rail.count())]
             self.assertNotIn("PLATFORMS", rail)  # the sidebar is the platforms (no heading) and, when there are any, the collections; All games / Favourites / Recently played are pills
-            self.assertTrue(any(t.startswith("SNES") and t.endswith("2") for t in rail))
+            counts = [(win.gm_rail.item(i).text(), win.gm_rail.item(i).data(COUNT_ROLE)) for i in range(win.gm_rail.count())]
+            self.assertTrue(any(t.startswith("SNES") and n == 2 for t, n in counts))  # a row is the platform's name; its count is drawn beside it
             self.assertTrue(win.gm_pills["all"].text().endswith("3") and win.gm_pills["all"].isChecked())
             self.assertEqual(win.gm_list.count(), 3)
             win.gm_search.setText("mario")
@@ -1877,6 +1897,7 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
             win._gm_toggle_favorite()
             self.assertTrue(win.gm_store.get(gid_of).favorite)
             win._gm_back()
+            win.gm_search.setText("")  # the search box narrows whichever pill is on: empty it to see the pills alone
             self.assertTrue(win.gm_pills["fav"].text().endswith("1"))
             win.gm_pills["fav"].click()
             self.assertEqual(win.gm_list.count(), 1)
@@ -2375,12 +2396,14 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
         self.assertTrue(win._torrent_search.isVisible())
         win._torrent_search.close()
 
-    def test_album_picker_popup_has_no_square_frame_behind_its_rounded_list(self):
+    def test_a_softened_combo_popup_has_no_square_frame_behind_its_rounded_list(self):
         from PySide6.QtCore import Qt
-        from distill.ui.soundtrack_page import AlbumCombo
+        from PySide6.QtWidgets import QComboBox
+        from distill.ui.popup import soften_popup
 
-        combo = AlbumCombo()
+        combo = QComboBox()  # the album picker is gone (albums are blocks now); this is the call it made, and what every drop-down gets
         self.addCleanup(combo.deleteLater)
+        soften_popup(combo)
         popup = combo.view().window()
         self.assertTrue(popup.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
         self.assertTrue(popup.windowFlags() & Qt.WindowType.FramelessWindowHint)
@@ -2399,11 +2422,16 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
         combo.ensurePolished()  # what Qt does just before a widget is first shown
         self.assertEqual(combo.view().window().objectName(), "comboPopup")
 
-    def test_game_rows_are_tall_enough_for_the_album_picker(self):
-        from distill.ui.soundtrack_page import GAME_ROW_H
+    def test_track_rows_are_tall_enough_for_the_buttons_in_them(self):
+        from distill.ui.albumview import ROW_H, TrackInfo, TrackLine
         from distill.ui.theme import T
 
-        self.assertGreaterEqual(GAME_ROW_H, 48)  # picker = text + 16px padding + border, inside 10px of item padding
+        # The game rows and the album picker in them are gone: an album is a block now, and its rows are tracks that hold buttons.
+        line = TrackLine(TrackInfo("1", "Opening", "FLAC, 10 B"), can_play=True)
+        self.addCleanup(line.deleteLater)
+        self.assertEqual((line.minimumHeight(), line.maximumHeight()), (ROW_H, ROW_H))
+        tallest = max(button.maximumHeight() for button in (line.savebtn, line.playbtn))
+        self.assertGreaterEqual(ROW_H, tallest + 10)  # the tallest control, inside the same 10px of padding the picker had
         self.assertNotIn("inlineCombo", T.qss())  # an override rule on the picker made it square and tiny: don't bring it back
 
     def test_icon_follows_the_look(self):
