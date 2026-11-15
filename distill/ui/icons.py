@@ -34,11 +34,15 @@ PATHS: dict[str, str] = {
     "chart": '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
     "download": '<path d="M12 3v12M7 10.5l5 5 5-5"/><path d="M4 18v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1"/>',
     "music": '<path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
+    "book": '<path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2z"/><path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7z"/>',
     "link": '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>'
             '<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
     "file": '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/>',
     "chevron-down": '<path d="M6 9l6 6 6-6"/>',
     "chevron-up": '<path d="M6 15l6-6 6 6"/>',
+    "chevron-left": '<path d="M15 6l-6 6 6 6"/>',
+    "expand": '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>',  # the usual full-screen square: four corner brackets
+    "collapse": '<path d="M9 4v5H4M15 4v5h5M20 15h-5v5M4 15h5v5"/>',
     "chevron-right": '<path d="M9 6l6 6-6 6"/>',
     "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     "calendar": '<rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
@@ -48,6 +52,7 @@ PATHS: dict[str, str] = {
     "pause": '<rect x=\"6.5\" y=\"5\" width=\"3.6\" height=\"14\" rx=\"1\" fill=\"@c\"/>'
              '<rect x=\"13.9\" y=\"5\" width=\"3.6\" height=\"14\" rx=\"1\" fill=\"@c\"/>',
     "star": '<path d="M12 3.2l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 3.1 1-6.1-4.4-4.3 6.1-.9z" fill="@c"/>',
+    "star-line": '<path d="M12 3.6l2.5 5.2 5.7.8-4.1 4 1 5.7-5.1-2.7-5.1 2.7 1-5.7-4.1-4 5.7-.8z"/>',  # the outline of the star: 'not a favourite'
     "stop": '<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\" fill=\"@c\"/>',
     "skip-forward": '<path d=\"M5 5l9 7-9 7z\" fill=\"@c\"/><path d=\"M18.5 5v14\"/>',
     "skip-back": '<path d=\"M19 5l-9 7 9 7z\" fill=\"@c\"/><path d=\"M5.5 5v14\"/>',
@@ -63,6 +68,29 @@ PATHS: dict[str, str] = {
     "trash": '<path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4h6v3"/>',
     "close": '<path d="M6 6l12 12M18 6L6 18"/>',
     "check": '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+    # music-player controls
+    "heart": '<path d="M12 20.3C6.4 16.3 3.5 13 3.5 9.4A4.6 4.6 0 0 1 12 7.1a4.6 4.6 0 0 1 8.5 2.3c0 3.6-2.9 6.9-8.5 10.9z"/>',
+    "heart-filled": '<path d="M12 20.3C6.4 16.3 3.5 13 3.5 9.4A4.6 4.6 0 0 1 12 7.1a4.6 4.6 0 0 1 8.5 2.3c0 3.6-2.9 6.9-8.5 10.9z" fill="@c"/>',
+    "star-outline": '<path d="M12 3.2l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 3.1 1-6.1-4.4-4.3 6.1-.9z"/>',
+    "more": '<circle cx="5.5" cy="12" r="1.9" fill="@c" stroke="none"/><circle cx="12" cy="12" r="1.9" fill="@c" stroke="none"/>'
+            '<circle cx="18.5" cy="12" r="1.9" fill="@c" stroke="none"/>',
+    "grip": '<circle cx="9" cy="6" r="1.5" fill="@c" stroke="none"/><circle cx="15" cy="6" r="1.5" fill="@c" stroke="none"/>'
+            '<circle cx="9" cy="12" r="1.5" fill="@c" stroke="none"/><circle cx="15" cy="12" r="1.5" fill="@c" stroke="none"/>'
+            '<circle cx="9" cy="18" r="1.5" fill="@c" stroke="none"/><circle cx="15" cy="18" r="1.5" fill="@c" stroke="none"/>',
+    "arrow-up": '<path d="M12 19V5M6 11l6-6 6 6"/>',
+    "arrow-down": '<path d="M12 5v14M6 13l6 6 6-6"/>',
+    "shuffle": '<path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/>',
+    "repeat": '<path d="M17 2.5l4 4-4 4"/><path d="M3 11.5v-1a4 4 0 0 1 4-4h14"/><path d="M7 21.5l-4-4 4-4"/><path d="M21 12.5v1a4 4 0 0 1-4 4H3"/>',
+    "repeat-one": '<path d="M17 2.5l4 4-4 4"/><path d="M3 11.5v-1a4 4 0 0 1 4-4h14"/><path d="M7 21.5l-4-4 4-4"/>'
+                  '<path d="M21 12.5v1a4 4 0 0 1-4 4H3"/><path d="M10.8 10.3l1.5-1v6"/>',
+    "refresh": '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+    "copy": '<rect x="8" y="8" width="13" height="13" rx="2.5"/><path d="M4 16c-1.1 0-2-.9-2-2V5c0-1.7 1.3-3 3-3h9c1.1 0 2 .9 2 2"/>',
+    "save": '<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/>',
+    "undo": '<path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+    "grid": '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/>',
+    "select-all": '<rect x="3.5" y="3.5" width="17" height="17" rx="3.5"/><path d="M8 12.5l3 3 5-6"/>',
+    "select-none": '<rect x="3.5" y="3.5" width="17" height="17" rx="3.5"/>',
+    "plus": '<path d="M12 5v14M5 12h14"/>',
     "edit": '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
     "settings": '<circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7'
                 'M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/>',

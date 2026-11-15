@@ -762,6 +762,144 @@ class ChosenCoverTests(Isolated):
         self.assertEqual((grids[0]["thumb"], grids[0]["author"], grids[1]["thumb"]), ("https://cdn/top.png", "Ann", "https://cdn/low_t.png"))
 
 
+class RecompsFolderTests(InstallTests):
+    """The Recomps folder, finding installs the person already has, and linking one by hand."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = rc.Store(self.tmp / "state.json")
+        self.lib = self.tmp / "My Recomps"
+        self.lib.mkdir()
+
+    def program(self, *parts: str) -> Path:
+        p = self.lib.joinpath(*parts)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"MZ")
+        return p
+
+    def test_the_folder_is_remembered(self):
+        self.assertIsNone(rc.recomps_root(self.store))
+        rc.set_recomps_root(self.store, self.lib)
+        self.assertEqual(rc.recomps_root(rc.Store(self.tmp / "state.json")), self.lib)  # survives a restart
+        rc.set_recomps_root(self.store, None)
+        self.assertIsNone(rc.recomps_root(self.store))
+
+    def test_a_fresh_install_goes_into_the_chosen_folder_and_an_update_stays_there(self):
+        rc.set_recomps_root(self.store, self.lib)
+        _s, inst, _ = self.run_install(make_zip({"Game.exe": b"MZ-v1"}), recomp())
+        self.assertEqual(Path(inst.folder), self.lib / "Game Port")
+        self.store.load()  # (run_install used a store of its own)
+        rc.set_recomps_root(self.store, self.tmp / "elsewhere")  # choosing another folder doesn't move what is installed
+        _s, inst2, _ = self.run_install(make_zip({"Game.exe": b"MZ-v2"}), recomp(), tag="v2")
+        self.assertEqual(inst2.folder, inst.folder)
+
+    def test_uninstall_removes_a_managed_install_even_after_the_folder_changed(self):
+        rc.set_recomps_root(self.store, self.lib)
+        _s, inst, _ = self.run_install(make_zip({"Game.exe": b"MZ"}), recomp())
+        self.store.load()  # (run_install used a store of its own)
+        rc.set_recomps_root(self.store, self.tmp / "elsewhere")
+        store = rc.Store(self.tmp / "state.json")
+        self.assertEqual(rc.uninstall(store, recomp()), "Uninstalled.")
+        self.assertFalse(Path(inst.folder).exists())
+        self.assertTrue(self.lib.is_dir())  # the folder itself is never removed
+        self.assertIsNone(store.installed("g"))
+
+    def test_uninstall_never_deletes_the_folder_it_was_pointed_at(self):
+        rc.set_recomps_root(self.store, self.lib)
+        self.store.set_installed(rc.Installed("g", "v1", str(self.lib), "Game.exe"))
+        self.program("Game.exe")
+        rc.uninstall(self.store, recomp())
+        self.assertTrue((self.lib / "Game.exe").exists())
+
+    def test_scan_finds_folders_and_loose_programs_named_like_a_project(self):
+        self.program("Game Port-v1.2.0", "GamePort.exe")
+        other = recomp(id="other", name="Other Thing", repo="o/other")
+        self.program("OtherThing.exe")
+        self.program("Unrelated", "Tool.exe")
+        rc.set_recomps_root(self.store, self.lib)
+        found = rc.scan_all(self.store, [recomp(), other], "windows")
+        self.assertEqual(set(found), {"g", "other"})
+        self.assertEqual((found["g"].linked, found["g"].exe, found["g"].version), ("folder", "GamePort.exe", "1.2.0"))
+        self.assertEqual((found["other"].linked, found["other"].exe), ("file", "OtherThing.exe"))
+
+    def test_scan_does_nothing_without_a_folder_and_skips_other_platforms(self):
+        self.program("Game Port", "GamePort.exe")
+        self.assertEqual(rc.scan_all(self.store, [recomp()], "windows"), {})
+        rc.set_recomps_root(self.store, self.lib)
+        self.assertEqual(rc.scan_all(self.store, [recomp(platforms=("linux",))], "windows"), {})
+
+    def test_apply_scan_links_new_finds_and_keeps_what_is_already_installed(self):
+        self.program("Game Port", "GamePort.exe")
+        rc.set_recomps_root(self.store, self.lib)
+        found = rc.scan_all(self.store, [recomp()], "windows")
+        self.assertEqual(rc.apply_scan(self.store, found), ["g"])
+        inst = self.store.installed("g")
+        self.assertEqual((inst.linked, inst.folder), ("folder", str(self.lib / "Game Port")))
+        self.assertEqual(rc.apply_scan(self.store, found), [])  # nothing new the second time
+        self.store.set_installed(rc.Installed("g", "v9", str(self.tmp / "managed"), "G.exe", linked=""))
+        self.assertEqual(rc.apply_scan(self.store, found), ["g"])  # its files are gone, so the find replaces it
+
+    def test_link_a_folder_or_a_program_by_hand(self):
+        exe = self.program("Mine", "GamePort.exe")
+        got = rc.link(self.store, recomp(), exe.parent, "windows")
+        self.assertEqual((got.linked, got.exe), ("folder", "GamePort.exe"))
+        self.assertEqual(self.store.installed("g").linked, "folder")
+        got = rc.link(self.store, recomp(), exe, "windows")  # the program itself
+        self.assertEqual((got.folder, got.exe), (str(exe.parent), "GamePort.exe"))
+        with self.assertRaises(rc.RecompError):
+            rc.link(self.store, recomp(), self.lib / "nope", "windows")
+        (self.lib / "Empty").mkdir()
+        with self.assertRaises(rc.RecompError):
+            rc.link(self.store, recomp(), self.lib / "Empty", "windows")
+
+    def test_a_program_loose_in_the_shared_folder_is_linked_as_a_file(self):
+        rc.set_recomps_root(self.store, self.lib)
+        exe = self.program("GamePort.exe")
+        self.assertEqual(rc.link(self.store, recomp(), exe, "windows").linked, "file")
+
+    def test_one_program_is_one_project(self):
+        exe = self.program("Mine", "GamePort.exe")
+        rc.link(self.store, recomp(), exe, "windows")
+        got = rc.link(self.store, recomp(id="h", name="Other Port", repo="o/h"), exe, "windows")
+        self.assertEqual(got.released, ("g",))  # the first let go: the person said what it is
+        self.assertIsNone(self.store.installed("g"))
+        self.store.set_installed(rc.Installed("m", "v1", str(self.lib / "Managed"), "M.exe"))  # Distill's own copy is never taken over
+        with self.assertRaises(rc.RecompError):
+            rc.link(self.store, recomp(id="z", name="Zed", repo="o/z"), self.program("Managed", "M.exe"), "windows")
+
+    def test_removing_a_linked_project_leaves_its_files(self):
+        exe = self.program("Mine", "GamePort.exe")
+        rc.link(self.store, recomp(), exe.parent, "windows")
+        self.assertIn("left where they are", rc.uninstall(self.store, recomp()))
+        self.assertTrue(exe.exists())
+        self.assertIsNone(self.store.installed("g"))
+
+    def test_updating_a_linked_folder_installs_in_place_and_keeps_the_players_files(self):
+        exe = self.program("Mine", "GamePort.exe")
+        (exe.parent / "saves").mkdir()
+        (exe.parent / "saves" / "a.sav").write_bytes(b"progress")
+        rc.link(self.store, recomp(), exe.parent, "windows")
+        _s, inst, _ = self.run_install(make_zip({"GamePort.exe": b"MZ-new"}), recomp(), tag="v2")
+        self.assertEqual(Path(inst.folder), exe.parent)
+        self.assertEqual(exe.read_bytes(), b"MZ-new")
+        self.assertEqual((exe.parent / "saves" / "a.sav").read_bytes(), b"progress")
+
+    def test_a_program_sharing_a_folder_is_not_updated_and_nothing_is_downloaded(self):
+        rc.set_recomps_root(self.store, self.lib)
+        exe = self.program("GamePort.exe")
+        rc.link(self.store, recomp(), exe, "windows")
+        with mock.patch.object(rc.urllib.request, "urlopen", side_effect=AssertionError("downloaded")):
+            with self.assertRaises(rc.RecompError):
+                rc.Installer(self.store).install(recomp(), rc.Release("v2", "v2", "", "", False, "", (asset("a.zip"),)), asset("a.zip"))
+        self.assertEqual(exe.read_bytes(), b"MZ")
+
+    def test_an_unknown_version_is_never_called_out_of_date(self):
+        known = rc.Installed("g", "v1.0", "f", "g.exe")
+        self.assertTrue(rc.update_available(known, "v1.1"))
+        self.assertFalse(rc.update_available(rc.Installed("g", "", "f", "g.exe"), "v1.1"))
+        self.assertFalse(rc.update_available(None, "v1.1"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

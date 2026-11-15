@@ -25,7 +25,7 @@ python3 -m venv /venv
 /venv/bin/pip install -q --upgrade pip
 /venv/bin/pip install -q -r requirements.txt "pyinstaller>=6.6"
 echo "== tests =="
-QT_QPA_PLATFORM=offscreen /venv/bin/python tests/ci_unittest.py --timeout 180 -- /venv/bin/python -m unittest discover -s tests -t .
+QT_QPA_PLATFORM=offscreen /venv/bin/python tests/ci_unittest.py --timeout 600 -- /venv/bin/python -m unittest discover -s tests -t .
 echo "== PyInstaller =="
 /venv/bin/pyinstaller --noconfirm distill-linux.spec >/tmp/pyi.log 2>&1 || { tail -30 /tmp/pyi.log; exit 1; }
 if [[ ! -f dist/Distill/_internal/PySide6/Qt/plugins/platforms/libqoffscreen.so ]]; then

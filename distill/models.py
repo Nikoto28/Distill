@@ -203,6 +203,11 @@ def fmt_size(n: int) -> str:
     return f"{n} B"
 
 
+def plural(n: int, noun: str, many: str | None = None) -> str:
+    """'1 track', '3 tracks' (pass `many` for an irregular plural: plural(2, 'library', 'libraries'))."""
+    return f"{n:,} {noun if n == 1 else (many or noun + 's')}"
+
+
 def fmt_duration(seconds: float) -> str:
     m = int(max(0, seconds) // 60)
     d, rest = divmod(m, 1440)

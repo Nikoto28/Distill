@@ -18,7 +18,7 @@ class NavTests(unittest.TestCase):
             "RVZ (Dolphin)", "Switch NSZ / NUP", "Xbox ISO / XEX", "ZAR Archive Tool"])
         self.assertEqual(names["ORGANISE LIBRARY"], ["Fix Names & Discs", "Remove Extras / Junk", "Patch ROMs",
                                                      "Sort by System", "Library Report"])
-        self.assertEqual(names["DOWNLOADS"], ["Files & Torrents", "Soundtrack Grabber"])
+        self.assertEqual(names["DOWNLOADS"], ["Files & Torrents", "Distill Resonance"])
         self.assertEqual(names["GAMES"], ["Games", "PC Recomps", "Emulators"])
 
     def test_every_page_has_a_title_blurb_detail_and_chip(self):
@@ -36,7 +36,7 @@ class NavTests(unittest.TestCase):
             "pkg": "PS4 PKG Manager", "pkg5": "PS5 PKG Manager", "rvz": "RVZ Compression (Dolphin)",
             "switch": "Switch NSZ / NUP Converter", "xbox": "Xbox ISO / XEX Repacker", "zar": "ZAR Archive Compressor", "fix": "Fix Names & Discs",
             "extras": "Remove Extras & Junk", "patch": "Patch ROMs", "bysystem": "Sort by System", "report": "Library Report",
-            "dl": "Files & Torrents", "sound": "Soundtrack Grabber", "games": "Games", "recomps": "PC Recomps", "emus": "Emulators"})
+            "dl": "Files & Torrents", "sound": "Distill Resonance", "games": "Games", "recomps": "PC Recomps", "emus": "Emulators"})
 
     def test_ps_pages_run_in_numerical_order(self):
         keys = [key for _g, items in NAV_GROUPS for key, _t in items]

@@ -83,6 +83,7 @@ class RemoteFile:
     preselect: bool = False  # the link pointed straight at this file
     source: str = ""  # "TorBox" (cached there), "Torrent" (the swarm) or "" (a direct web download)
     fmt: str = ""  # a video / audio site row's own choice from the picker ('mp4:1080', 'mp3:320'); blank = Settings
+    seconds: int | None = None  # a track's length, when the listing says (shown under its title in Distill Resonance)
 
 
 SESSION_FILE = paths.state_dir() / "distill_download_session.json"  # the Download tab's list, ticks, filter and options

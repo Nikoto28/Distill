@@ -26,7 +26,7 @@ from .dialogs import SummaryDialog
 from .logview import LogHighlighter
 from .nav import PAGE_INFO
 from .state import TOOLS
-from .widgets import StatusLabel
+from .widgets import StatusLabel, symbolize
 from .theme import T
 
 
@@ -57,9 +57,10 @@ class RunMixin:
         row.addWidget(self.log_find)
         copy_btn, save_btn, clear_btn = QPushButton("Copy log"), QPushButton("Save log..."), QPushButton("Clear")
         self._log_btns = (self.log_find, copy_btn, save_btn, clear_btn)
-        for btn in (copy_btn, save_btn, clear_btn):
+        for btn, symbol, tip in ((copy_btn, "copy", "Copy the log"), (save_btn, "save", "Save the log to a file"), (clear_btn, "trash", "Clear the log")):
             btn.setFlat(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            symbolize(btn, symbol, tip, width=34)
             row.addWidget(btn)
         save_btn.clicked.connect(self._log_save)
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.log.toPlainText()))
@@ -169,6 +170,8 @@ class RunMixin:
         kind = mode if mode in ("dl", "org", "games", "recomps", "emus") else "conv"
         if self._away_from_run():
             kind = "away"  # the log and bar belong to the job running on another page; the bar along the bottom stands for them here
+        if self.current_page == "sound":
+            kind = "sound"  # Distill Resonance has no log: its page fills the window and its own bar sits along the bottom (st_dock)
         if kind == self._panel_mode:
             return
         before, self._panel_mode = self._panel_mode, kind
@@ -177,7 +180,7 @@ class RunMixin:
         dl = kind == "dl"  # the Download pages show the download run's own bar and speed line
         for w, shown in ((self.pb_total, not dl), (self.lbl_eta, not dl), (self.dl_pb, dl), (self.dl_eta, dl)):
             w.setVisible(shown)
-        hides_panel = ("org", "games", "recomps", "emus", "away")
+        hides_panel = ("org", "games", "recomps", "emus", "away", "sound")
         self._panel_gen = gen = getattr(self, "_panel_gen", 0) + 1  # a change of mind cancels what the last one had pending
         if (running := getattr(self, "_panel_anim", None)) is not None:
             running.stop()
@@ -338,6 +341,18 @@ class RunMixin:
                     self._st_on_found(row, res)
                 case ("st_tracks", token, row, album, files, error) if token == self._st_token:
                     self._st_on_tracks(row, album, files, error)
+                case ("st_local", found):
+                    self._st_on_local(found)
+                case ("st_khi", ok, text):
+                    self._st_on_khi(ok, text)
+                case ("st_browse", kind, token, payload, pages, error):
+                    self._st_on_browse(kind, token, payload, pages, error)
+                case ("st_export", path, count, skipped, error):
+                    self._st_on_export(path, count, skipped, error)
+                case ("st_home", key, albums, error):
+                    self._st_on_home(key, albums, error)
+                case ("st_files", key, files, error):
+                    self._st_on_files(key, files, error)
                 case ("st_resolved", token, out):
                     self._st_on_resolved(token, out)
                 case ("st_stream", token, index, url, error):

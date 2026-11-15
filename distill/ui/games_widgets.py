@@ -12,12 +12,13 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget, QPlainT
                                QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
 from .. import games as gm
-from . import fillmath, icons, motion
+from . import fillmath, icons, motion, shimmermath
+from .shimmer import paint_band
 from .emu_cards import SourceChip, clear_layout
 from .recomp_page import CELL_W, ID_ROLE, POSTER_H, POSTER_W, art_rect, rounded_pixmap, star_polygon
 from .assets import asset
 from .theme import AlignC, T
-from .widgets import accent_button, BackdropView  # noqa: F401  (BackdropView lives in widgets.py now; the Recomp page uses it too)
+from .widgets import accent_button, BackdropView, symbolize  # noqa: F401  (BackdropView lives in widgets.py now; the Recomp page uses it too)
 
 CELL_H = 322  # a poster, then the title and the system under it
 DOT = 20  # the select dot in a poster's top-left corner
@@ -117,7 +118,15 @@ class GameDelegate(QStyledItemDelegate):
         p.save()
         p.setClipPath(clip)
         if pix is not None:
-            p.drawPixmap(poster, pix, QRectF(pix.rect()))
+            came = self.win._gm_fade_of(gid)  # a cover that has just arrived comes in over the placeholder instead of appearing
+            if came < 1.0:
+                p.fillRect(poster, T.input)
+                was = p.opacity()
+                p.setOpacity(was * came)
+                p.drawPixmap(poster, pix, QRectF(pix.rect()))
+                p.setOpacity(was)
+            else:
+                p.drawPixmap(poster, pix, QRectF(pix.rect()))
         else:
             p.fillRect(poster, T.input)
             p.setPen(T.fg3)
@@ -126,6 +135,8 @@ class GameDelegate(QStyledItemDelegate):
             f.setPointSizeF((f.pointSizeF() if f.pointSizeF() > 0 else 10.0) + 1)
             p.setFont(f)
             p.drawText(poster.adjusted(12, 12, -12, -12), int(Qt.AlignmentFlag.AlignCenter) | int(Qt.TextFlag.TextWordWrap), g.name)
+            if gid in self.win._gm_art_pending and motion.on():  # the cover is on its way: a light band sweeps the card (neighbours a beat apart)
+                paint_band(p, poster, shimmermath.stagger(index.row() % 8))
         if selected:
             wash = QColor(T.accent)
             wash.setAlpha(36)
@@ -619,26 +630,386 @@ class ElideLabel(QLabel):
         self.setText(self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, max(10, self.width())))
 
 
+class CoverStage(QWidget):
+    """The game page's cover with the game's own media: a disc turning slowly half behind the cover, or a cartridge poking half way up from
+    behind it. The cover is a child, so it paints over the media; this widget makes room for the part that sticks out and draws it.
+    Without media it is exactly the cover's size."""
+
+    DISC_SCALE = 0.78  # the disc's diameter, as a share of the cover's height
+    CART_SCALE = 0.66  # the cartridge's width, as a share of the cover's width
+    DEGREES_PER_SECOND = 14.0  # one turn in about 26 seconds
+    THROW_TAU = 1.1  # seconds: how quickly a thrown disc eases back to its own speed (nearly done after about three times this)
+    MAX_SPIN = 1080.0  # the fastest a throw can spin it, in degrees a second (three turns)
+    HOLD_STILL_S = 0.08  # held this long without moving before the let-go: it is put down, not thrown
+    CART_PUSH = 0.92  # how far down a cartridge can be pushed, as a share of the part that sticks out (it never quite vanishes)
+    CART_SPRING = 60.0  # how hard it is pulled back up (per second squared)
+    CART_DAMPING = 4.0  # how quickly its motion dies away (per second)
+    CART_BOUNCE = 0.55  # the share of its speed it keeps when it hits its stop at the top
+    MAX_CART_SPEED = 700.0  # the fastest a flick can send it, in pixels a second
+
+    def __init__(self, cover: QWidget) -> None:
+        super().__init__()
+        self._cover = cover
+        cover.setParent(self)
+        cover.move(0, 0)
+        self._kind = ""
+        self._source: QPixmap | None = None
+        self._pix: QPixmap | None = None  # the picture at the size it is drawn
+        self._size = (0, 0)  # what it is drawn at, in logical pixels
+        self._top = 0  # how far the cover sits below the top, for a cartridge
+        self._angle = 0.0
+        self._speed = self.DEGREES_PER_SECOND  # how fast it is turning now (a throw changes it, then it eases back)
+        self._held = False  # grabbed with the mouse
+        self._grip = 0.0  # the angle of the pointer round the disc's centre at the last move
+        self._moved = 0.0  # when that was
+        self._flick = 0.0  # how fast the pointer has been going round, in degrees a second (smoothed)
+        self._cart_dy = 0.0  # how far a cartridge has been pushed down into the cover (0 = resting)
+        self._cart_v = 0.0  # how fast it is moving, in pixels a second (down is positive)
+        self._cart_held = False  # grabbed with the mouse
+        self._cart_anchor = 0.0  # where the pointer was, less how far down the cartridge already was
+        self._cart_flick = 0.0  # how fast the pointer has been going up or down, in pixels a second (smoothed)
+        self._cart_moved = 0.0  # when the pointer last moved
+        self._cart_anim = False  # springing back
+        self._last = 0.0
+        self.setMouseTracking(True)
+        self.on_top_pad = None  # called with the cover's offset, so the text beside it can line up with the cover
+        self._timer = motion.frame_timer(self)  # (a precise timer: the default snaps to the system clock, ~15 ms on Windows, so frames arrive unevenly)
+        self._timer.timeout.connect(self._tick)
+        self.sync()
+
+    def set_media(self, kind: str, pix: QPixmap | None) -> None:
+        """Show `kind` ('disc' or 'cart') with this picture, or nothing (kind '' or no picture). A cartridge must have see-through corners to
+        look right, so one without them is not shown; a disc without them is cut round."""
+        if not kind or pix is None or pix.isNull() or (kind == "cart" and not pix.hasAlphaChannel()):
+            kind, pix = "", None
+        self._kind, self._source = kind, pix
+        self._angle, self._speed, self._held = 0.0, self.DEGREES_PER_SECOND, False
+        self._cart_reset()
+        self.unsetCursor()
+        self.sync()
+
+    def media_kind(self) -> str:
+        return self._kind if self._pix is not None else ""
+
+    def sync(self) -> None:
+        """Lay the cover and the media out again. Call it whenever the cover's size changes."""
+        cw, ch = self._cover.width(), self._cover.height()
+        dpr = self.devicePixelRatioF() if hasattr(self, "devicePixelRatioF") else 1.0
+        self._pix, self._size, right, self._top = None, (0, 0), 0, 0
+        if self._source is not None and cw > 0 and ch > 0:
+            if self._kind == "disc":
+                d = max(8, round(ch * self.DISC_SCALE))
+                self._pix, self._size, right = self._round(self._source, d, dpr), (d, d), d // 2
+            else:
+                w = max(8, round(cw * self.CART_SCALE))
+                h = max(8, round(w * self._source.height() / max(1, self._source.width())))
+                self._pix = self._source.scaled(round(w * dpr), round(h * dpr), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self._pix.setDevicePixelRatio(dpr)
+                self._size, self._top = (w, h), h // 2
+        self._cover.move(0, self._top)
+        self.setFixedSize(cw + right, ch + self._top)
+        if callable(self.on_top_pad):
+            self.on_top_pad(self._top)
+        self._run(self.isVisible())
+        self.update()
+
+    @staticmethod
+    def _round(source: QPixmap, d: int, dpr: float) -> QPixmap:
+        """The picture as a d x d disc: see-through pictures are only scaled, others are cut to a circle."""
+        px = round(d * dpr)
+        out = QPixmap(px, px)
+        out.fill(Qt.GlobalColor.transparent)
+        p = QPainter(out)
+        p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        if not source.hasAlphaChannel():
+            clip = QPainterPath()
+            clip.addEllipse(QRectF(0, 0, px, px))
+            p.setClipPath(clip)
+        fitted = source.scaled(px, px, Qt.AspectRatioMode.KeepAspectRatioByExpanding if not source.hasAlphaChannel() else Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+        p.drawPixmap((px - fitted.width()) // 2, (px - fitted.height()) // 2, fitted)
+        p.end()
+        out.setDevicePixelRatio(dpr)
+        return out
+
+    def _disc_rect(self) -> QRect:
+        d = self._size[0]
+        return QRect(self._cover.width() - d // 2 - 1, self._cover.height() // 2 - d // 2 - 1, d + 2, d + 2)
+
+    def _disc_dirty(self) -> QRect:
+        """Where the disc changes from one frame to the next: the half that sticks out to the right. The other half is under the cover, and
+        asking for it to be repainted would repaint the cover too, on every frame."""
+        d = self._size[0]
+        return QRect(self._cover.width(), self._top + self._cover.height() // 2 - d // 2 - 1, d // 2 + 2, d + 2)
+
+    def _frame_ms(self) -> int:
+        """One frame at the screen's own refresh rate (60, 120 Hz...), so the motion is as smooth as the screen can show it."""
+        return motion.frame_ms(self)
+
+    def _run(self, on: bool) -> None:
+        """Run only while something is moving: a disc is on screen, or a cartridge is springing back. Not at all when motion is reduced
+        (it is then shown still)."""
+        spin = on and self._pix is not None and motion.on() and (self._kind == "disc" or (self._kind == "cart" and self._cart_anim))
+        if spin and not self._timer.isActive():
+            self._last = time.monotonic()
+            self._timer.start(self._frame_ms())
+        elif not spin:
+            self._timer.stop()
+
+    def _tick(self) -> None:
+        now = time.monotonic()
+        if self._kind == "cart":
+            self._cart_advance(now - self._last)
+            self._last = now
+            self.update(self._cart_rect())
+            return
+        self._advance(now - self._last)
+        self._last = now
+        self.update(self._disc_dirty())
+
+    def _advance(self, dt: float) -> None:
+        """Turn the disc for `dt` seconds. A thrown disc's speed eases back to the usual one (through zero if it was thrown the other way)."""
+        if self._held:
+            return  # the pointer is turning it
+        base = self.DEGREES_PER_SECOND
+        self._speed = base + (self._speed - base) * math.exp(-dt / self.THROW_TAU)
+        if abs(self._speed - base) < 0.5:
+            self._speed = base
+        self._angle = (self._angle + self._speed * dt) % 360.0
+
+    # ---- the easter egg: grab the disc and throw it ------------------------------------------------------------
+    def _centre(self) -> QPointF:
+        return QPointF(self._cover.width(), self._top + self._cover.height() / 2)
+
+    def _on_disc(self, pos: QPointF) -> bool:
+        if self._kind != "disc" or self._pix is None or not motion.on():
+            return False
+        c, r = self._centre(), self._size[0] / 2
+        return (pos.x() - c.x()) ** 2 + (pos.y() - c.y()) ** 2 <= r * r
+
+    def _pointer_angle(self, pos: QPointF) -> float:
+        c = self._centre()
+        return math.degrees(math.atan2(pos.y() - c.y(), pos.x() - c.x()))  # clockwise from the right, as the painter turns
+
+    def _grab(self, pos: QPointF, now: float) -> None:
+        self._held, self._grip, self._moved, self._flick = True, self._pointer_angle(pos), now, 0.0
+
+    def _drag_to(self, pos: QPointF, now: float) -> None:
+        a = self._pointer_angle(pos)
+        turn = (a - self._grip + 180.0) % 360.0 - 180.0  # the short way round
+        self._angle = (self._angle + turn) % 360.0
+        self._grip = a
+        if (dt := now - self._moved) >= 0.004:  # (moves a few thousandths of a second apart say nothing about speed)
+            self._flick = 0.55 * (turn / dt) + 0.45 * self._flick
+            self._moved = now
+
+    def _release(self, now: float) -> None:
+        """Let go: it keeps the speed the pointer had, unless it was held still first."""
+        self._held = False
+        fast = now - self._moved <= self.HOLD_STILL_S
+        self._speed = max(-self.MAX_SPIN, min(self.MAX_SPIN, self._flick)) if fast else self.DEGREES_PER_SECOND
+        self._flick = 0.0
+        self._last = time.monotonic()
+
+    # ---- the cartridge: push it down and it springs back up ----------------------------------------------------
+    def _cart_reset(self) -> None:
+        self._cart_dy = self._cart_v = self._cart_flick = 0.0
+        self._cart_held = self._cart_anim = False
+
+    def _cart_rect(self) -> QRect:
+        """The part of the cartridge that shows above the cover (the rest is behind it)."""
+        w = self._size[0]
+        return QRect(round((self._cover.width() - w) / 2) - 2, 0, w + 4, self._top + 1)
+
+    def _on_cart(self, pos: QPointF) -> bool:
+        if self._kind != "cart" or self._pix is None or not motion.on():
+            return False
+        w = self._size[0]
+        left = (self._cover.width() - w) / 2
+        return left <= pos.x() <= left + w and self._cart_dy <= pos.y() <= self._top  # the part that sticks out, not the cover
+
+    def _cart_pull(self, raw: float) -> float:
+        """How far down it goes for a pointer that has moved `raw` pixels: one to one at first, then it resists (a rubber band)."""
+        limit = self._top * self.CART_PUSH
+        return limit * math.tanh(raw / limit) if raw > 0 and limit > 0 else 0.0
+
+    def _cart_grab(self, pos: QPointF, now: float) -> None:
+        self._cart_held, self._cart_anim, self._cart_v = True, False, 0.0
+        self._cart_anchor, self._cart_moved, self._cart_flick = pos.y() - self._cart_dy, now, 0.0
+
+    def _cart_drag_to(self, pos: QPointF, now: float) -> None:
+        before = self._cart_dy
+        self._cart_dy = self._cart_pull(pos.y() - self._cart_anchor)
+        if (dt := now - self._cart_moved) >= 0.004:  # (moves a few thousandths of a second apart say nothing about speed)
+            self._cart_flick = 0.55 * ((self._cart_dy - before) / dt) + 0.45 * self._cart_flick
+            self._cart_moved = now
+
+    def _cart_release(self, now: float) -> None:
+        """Let go: it springs back up, carrying the speed the pointer had (unless it was held still first)."""
+        self._cart_held = False
+        fast = now - self._cart_moved <= self.HOLD_STILL_S
+        self._cart_v = max(-self.MAX_CART_SPEED, min(self.MAX_CART_SPEED, self._cart_flick)) if fast else 0.0
+        self._cart_flick = 0.0
+        self._cart_anim = self._cart_dy > 0.01 or abs(self._cart_v) > 1.0
+        self._last = time.monotonic()
+        self._run(self.isVisible())
+
+    def _cart_advance(self, dt: float) -> None:
+        """Spring it back up for `dt` seconds. At the top it hits its stop and bounces a few times, smaller each time, then rests."""
+        if self._cart_held or not self._cart_anim:
+            return
+        steps = max(1, math.ceil(min(dt, 0.1) / 0.008))  # small steps, so a slow frame cannot throw it about
+        h = min(dt, 0.1) / steps
+        floor = self._top * self.CART_PUSH
+        for _ in range(steps):
+            self._cart_v += (-self.CART_SPRING * self._cart_dy - self.CART_DAMPING * self._cart_v) * h
+            self._cart_dy += self._cart_v * h
+            if self._cart_dy < 0.0:  # it has hit its stop at the top
+                self._cart_dy, self._cart_v = 0.0, -self._cart_v * self.CART_BOUNCE
+            elif self._cart_dy > floor:  # (a hard flick down) it cannot go further in than this
+                self._cart_dy, self._cart_v = floor, min(self._cart_v, 0.0)
+        if self._cart_dy < 0.25 and abs(self._cart_v) < 12.0:  # settled
+            self._cart_dy, self._cart_v, self._cart_anim = 0.0, 0.0, False
+            self._run(self.isVisible())
+            self.update(self._cart_rect())
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._on_disc(event.position()):
+                self._grab(event.position(), time.monotonic())
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
+            if self._on_cart(event.position()):
+                self._cart_grab(event.position(), time.monotonic())
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._held:
+            self._drag_to(event.position(), time.monotonic())
+            self.update(self._disc_dirty())
+            event.accept()
+            return
+        if self._cart_held:
+            self._cart_drag_to(event.position(), time.monotonic())
+            self.update(self._cart_rect())
+            event.accept()
+            return
+        if self._on_disc(event.position()) or self._on_cart(event.position()):
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and (self._held or self._cart_held):
+            if self._held:
+                self._release(time.monotonic())
+            else:
+                self._cart_release(time.monotonic())
+                self.update(self._cart_rect())
+            over = self._on_disc(event.position()) or self._on_cart(event.position())
+            self.setCursor(Qt.CursorShape.OpenHandCursor if over else Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._run(True)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self._held = False
+        self._cart_reset()  # (a cartridge that was mid-bounce is simply at rest when the page comes back)
+        self._run(False)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        if self._pix is None:
+            return
+        p = QPainter(self)
+        p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        w, h = self._size
+        if self._kind == "disc":
+            p.translate(self._cover.width(), self._top + self._cover.height() / 2)  # the disc's centre is on the cover's right edge: half behind it
+            p.rotate(self._angle)
+            p.drawPixmap(QPointF(-w / 2, -h / 2), self._pix)
+        else:
+            p.drawPixmap(QPointF((self._cover.width() - w) / 2, self._cart_dy), self._pix)  # its lower half is behind the cover, which starts half way down it; pushed down, more of it is
+
+
+class StatStrip(QFrame):
+    """The facts about a game (released, time played, last played, genre) as one rounded panel, its cells divided by thin lines, rather than
+    four separate boxes. Add `StatTile`s with `add`; the strip draws the panel and the dividers."""
+
+    def __init__(self, backdrop: "BackdropView | None" = None):
+        super().__init__()
+        self.setObjectName("statStrip")
+        self._backdrop = backdrop  # the picture behind the page: the panel shows it blurred and darkened
+        if backdrop is not None:
+            backdrop.artChanged.connect(self.update)
+        self._lay = QHBoxLayout(self)
+        self._lay.setContentsMargins(4, 4, 4, 4)
+        self._lay.setSpacing(0)
+        T.bind(self, self._restyle)
+
+    def add(self, tile: "StatTile", stretch: int = 1) -> None:
+        if self._lay.count():
+            line = QFrame()
+            line.setFixedWidth(1)
+            line.setObjectName("statDivider")
+            self._lay.addWidget(line)
+        self._lay.addWidget(tile, stretch)
+        self._restyle()
+
+    def paintEvent(self, _event) -> None:
+        """A frosted panel: the game's picture behind it, blurred, under a dark wash (a light one on a light theme) that is mostly see-through."""
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        shape = QPainterPath()
+        shape.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 14, 14)
+        p.setClipPath(shape)
+        if self._backdrop is not None:
+            top_left = self.mapTo(self._backdrop, QPoint(0, 0))
+            p.drawPixmap(0, 0, self._backdrop.frosted(QRect(top_left, self.size())))
+        light = T.bg.lightness() > 128
+        p.fillPath(shape, QColor(255, 255, 255, 110) if light else QColor(0, 0, 0, 105))
+        p.setClipping(False)
+        p.setPen(QPen(QColor(255, 255, 255, 30) if not light else QColor(0, 0, 0, 30), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(shape)
+
+    def _restyle(self) -> None:
+        self.setStyleSheet(f"QFrame#statDivider {{ background: {T.card_border.name()}; border: none; margin: 10px 0; }}")
+        self.update()
+
+
 class StatTile(QFrame):
-    """One small rounded tile on a game's card: an icon, a caption and a single value ('-' in a quiet colour when there is nothing to show)."""
+    """One cell of the StatStrip: an icon in a soft round chip, a small caption and a single value ('-' in a quiet colour when there is nothing to show)."""
 
     def __init__(self, icon: str, caption: str):
         super().__init__()
         self.setObjectName("statTile")
         self._icon, self._empty = icon, True
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 9, 12, 10)
-        lay.setSpacing(10)
+        lay.setContentsMargins(12, 7, 12, 7)
+        lay.setSpacing(12)
         self.glyph = QLabel()
-        self.glyph.setFixedSize(20, 20)
+        self.glyph.setFixedSize(34, 34)
+        self.glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.glyph, 0, Qt.AlignmentFlag.AlignVCenter)
         col = QVBoxLayout()
-        col.setSpacing(1)
+        col.setSpacing(0)
         self.caption = QLabel(caption)
         self.value = ElideLabel()
         self.value.set_full_text("-")
+        col.addStretch(1)
         col.addWidget(self.caption)
         col.addWidget(self.value)
+        col.addStretch(1)
         lay.addLayout(col, 1)
         T.bind(self, self._restyle)
 
@@ -649,11 +1020,13 @@ class StatTile(QFrame):
         self._restyle()
 
     def _restyle(self) -> None:
-        self.setStyleSheet(f"QFrame#statTile {{ background: {T.input.name()}; border: 1px solid {T.card_border.name()}; border-radius: 12px; }}"
+        a = T.accent_text
+        self.setStyleSheet("QFrame#statTile { background: transparent; border: none; }"
                            "QLabel { background: transparent; border: none; }")
-        self.glyph.setPixmap(icons.pixmap(self._icon, T.accent_text, 18))
+        self.glyph.setStyleSheet(f"background: rgba({a.red()}, {a.green()}, {a.blue()}, 38); border-radius: 17px;")  # a soft chip of the accent colour
+        self.glyph.setPixmap(icons.pixmap(self._icon, a if not self._empty else T.fg3, 17))
         self.caption.setStyleSheet(f"color: {T.fg3.name()}; font-size: 9pt; font-weight: 600;")
-        self.value.setStyleSheet(f"color: {(T.fg3 if self._empty else T.title).name()}; font-size: 10.5pt; font-weight: 700;")
+        self.value.setStyleSheet(f"color: {(T.fg3 if self._empty else T.title).name()}; font-size: 11.5pt; font-weight: 700;")
 
 
 class StarRating(QWidget):
@@ -922,6 +1295,17 @@ class SelectionBar(QFrame):
         self.close_btn.setAutoRaise(True)
         for b in (self.all_btn, self.platform_btn, self.match_btn, self.fav_btn, self.remove_btn):
             b.setMinimumHeight(36)
+        symbolize(self.all_btn, "select-all", "Select all", width=44)
+        symbolize(self.platform_btn, "plus", width=56)  # (wider: it has a menu arrow beside its symbol)
+        symbolize(self.match_btn, "info", width=44)
+        symbolize(self.remove_btn, "trash", width=44, danger=True)
+        self._fav_all = False  # the selected games are all favourites already: the button then takes them off
+        self.fav_btn.setText("")
+        self.fav_btn.setFixedSize(44, 36)
+        self.fav_btn.setIconSize(QSize(18, 18))
+        self.fav_btn.setStyleSheet("padding: 0;")
+        T.bind(self.fav_btn, self._paint_fav)
+        self.set_all_favourite(False)
         lay.addWidget(self.count)
         lay.addStretch(1)
         for b in (self.all_btn, self.platform_btn, self.match_btn, self.fav_btn, self.remove_btn, self.close_btn):
@@ -969,6 +1353,16 @@ class SelectionBar(QFrame):
         self.setFixedWidth(width)
         if self._open and self._page_on and not self._anim.state() == QPropertyAnimation.State.Running:
             self.move(x, shown)
+
+    def set_all_favourite(self, on: bool) -> None:
+        """The favourite button's star: filled (and 'Unfavourite') when every selected game is a favourite already."""
+        self._fav_all = on
+        self.fav_btn.setToolTip("Unfavourite" if on else "Favourite")
+        self.fav_btn.setAccessibleName("Unfavourite" if on else "Favourite")
+        self._paint_fav()
+
+    def _paint_fav(self) -> None:
+        self.fav_btn.setIcon(icons.icon("star", QColor("#fbbf24"), 18) if self._fav_all else icons.icon("star-line", T.fg, 18))
 
     def set_open(self, open_: bool) -> None:
         if open_ == self._open:
@@ -1063,8 +1457,8 @@ class ButtonFill(QWidget):
         self._anim = QVariantAnimation(self)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.valueChanged.connect(self._step)
-        self._ripple = QTimer(self)
-        self._ripple.setInterval(40)
+        self._clock = motion.FrameClock()
+        self._ripple = motion.frame_timer(self)
         self._ripple.timeout.connect(self._tick)
         self.hide()
 
@@ -1074,7 +1468,8 @@ class ButtonFill(QWidget):
         self.raise_()
         self.show()
         if motion.on():
-            self._ripple.start()
+            self._clock.reset()
+            self._ripple.start(motion.frame_ms(self))
 
     def progress(self, frac: float) -> None:
         if not self._on:
@@ -1105,7 +1500,7 @@ class ButtonFill(QWidget):
         self.update()
 
     def _tick(self) -> None:
-        self._phase = (self._phase + 0.35) % (2 * math.pi)
+        self._phase = (self._phase + 8.75 * self._clock.dt()) % (2 * math.pi)  # 8.75 radians a second: what 0.35 a frame was at 25 fps
         self.update()
 
     def paintEvent(self, _event) -> None:  # noqa: N802

@@ -175,7 +175,7 @@ class DownloadMixin:
         # -- the list, across the full width
         files = Card()
         head = section_header("Files", "file")
-        tip = QLabel("Click a row to tick or untick it. Right-click for more.")
+        tip = QLabel("Click a row to select or deselect it. Right-click for more.")
         tip.setObjectName("hint")
         head.addWidget(tip)
         files.add(head)
@@ -192,7 +192,7 @@ class DownloadMixin:
         clear = QPushButton("Select none")
         clear.clicked.connect(lambda: self._dl_select(False))
         remove = QPushButton("Remove selected")
-        remove.setToolTip("Remove the ticked files from the list")
+        remove.setToolTip("Remove the selected files from the list")
         remove.clicked.connect(lambda: self._dl_delete(sorted(self.dl_checked)))
         # the toolbar acts on the list: find files, tick them, drop them (the one destructive button sits apart, at the end)
         bar.addWidget(self.dl_filter)
@@ -607,8 +607,8 @@ class DownloadMixin:
             add("Download these first", lambda: self._dl_prioritize(waiting), bool(waiting) and not blocked)
             add("Normal priority", lambda: self._dl_unprioritize(rows), any(i in self._dl_prio() for i in rows))
             menu.addSeparator()
-            add("Tick", lambda: self._dl_set_ticks(rows, True), not running and len(ticked) < len(rows))
-            add("Untick", lambda: self._dl_set_ticks(rows, False), not running and bool(ticked))
+            add("Select", lambda: self._dl_set_ticks(rows, True), not running and len(ticked) < len(rows))
+            add("Deselect", lambda: self._dl_set_ticks(rows, False), not running and bool(ticked))
             menu.addSeparator()
             add("Copy names" if many else "Copy name", lambda: self._dl_copy(rows, False))
             add("Copy links" if many else "Copy link", lambda: self._dl_copy(rows, True), has_links)
@@ -857,7 +857,7 @@ class DownloadMixin:
         picks = sorted((i for i in (self.dl_checked if only is None else only)
                         if i < len(self.dl_files) and i not in self.dl_model.removed), key=lambda i: (i not in first, i))
         if not picks:
-            self._toast("Fetch a file list and tick at least one file first.", "warn", 6000)
+            self._toast("Fetch a file list and select at least one file first.", "warn", 6000)
             return
         dest = self._dl_dest_path()  # an empty Save to box means the Downloads folder
         try:
@@ -869,7 +869,7 @@ class DownloadMixin:
         is_torrent = [self.dl_files[i].url.startswith("torrent:") for i in picks]
         if any(is_torrent) and not all(is_torrent):
             self._error("Mixed Selection", "Torrent files and web files can't be downloaded in the same run. "
-                                           "Untick one kind and start again.")
+                                           "Deselect one kind and start again.")
             return
         jobs = [(i, self.dl_files[i]) for i in picks]
         if all(is_torrent):

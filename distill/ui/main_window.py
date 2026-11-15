@@ -54,6 +54,8 @@ from .games_page import GamesMixin
 from .recomp_page import RecompMixin
 from . import persist, msgbox
 from .persist import PersistMixin
+from ..mediaqueue import PlayQueue
+from ..mediastore import MediaStore
 from .soundtrack_page import SoundtrackMixin
 from .switch_page import SwitchMixin
 from .run_panel import RunMixin
@@ -166,10 +168,10 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self._st_rows: list = []  # its games, one SoundRow each
         self._st_player = None  # the preview player, made on first use
         self._st_output = None
-        self._st_queue: list = []  # (title, game, url) of the tracks being stepped through
-        self._st_index = -1  # which of them is playing; -1 when nothing is
+        self.pq = PlayQueue()  # what is playing and what is up next (see mediaqueue.py)
         self._st_art_cache: dict = {}  # cover address -> QPixmap
         self._st_art_loading: set = set()
+        self.media_store = MediaStore()  # the Media page's library, saved track lists and audio cache
         self._dl_next: list[int] = []  # rows lined up to start when the current run ends
         self._dl_epoch = 0  # bumped whenever rows are renumbered, so a slow start-up disk scan can't mark the wrong ones
         self._dl_cleared = False  # the person emptied the list (so the saved copy goes too)
@@ -432,6 +434,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self.settings_btn.clicked.connect(lambda: self._set_settings_visible(not self._settings_visible))
         hl.addWidget(self.settings_btn, 0, Qt.AlignmentFlag.AlignTop)
         col.addWidget(header)
+        self.page_header = header  # Distill Resonance has a header of its own (see _show_page)
         self.banner = Banner()  # notices that only need a glance; shown between the title and the page
         banner_wrap = QWidget()
         bw = QHBoxLayout(banner_wrap)
@@ -462,6 +465,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         il.setContentsMargins(0, 0, 10, 4)
         il.setSpacing(10)
         il.addWidget(self.stack)
+        self._inner_lay = il  # (Distill Resonance gives the stack all the room: its lists run the full length of the window)
         self.perf.setParent(inner)  # lives inside the showing page's right column (see _place_perf)
         self.perf.hide()
         self.perf.header.setChecked(True)
@@ -516,8 +520,10 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         bar_lay.addWidget(bar)
         self.bar_wrap = bar_wrap  # the PC Recomps page has no batch to start, so it hides the bar
         col.addWidget(bar_wrap)
+        self._st_link_dock()
+        col.addWidget(self.st_dock)  # Distill Resonance's own bottom bar: select / save buttons over the download progress
         for seq, button in (("Ctrl+Return", self.start_btn), ("Ctrl+P", self.pause_btn), ("Ctrl+.", self.stop_btn)):
-            QShortcut(QKeySequence(seq), self, activated=button.click)  # click() is a no-op while disabled
+            QShortcut(QKeySequence(seq), self, activated=lambda b=button: None if self.current_page == "sound" else b.click())  # click() is a no-op while disabled; the Distill Resonance page has no bar, so no keys either
         QShortcut(QKeySequence("Ctrl+,"), self, activated=lambda: self._open_settings())
         QShortcut(QKeySequence("Ctrl+K"), self, activated=self._open_goto)
         for n in range(1, 10):  # Ctrl+1 ... Ctrl+9 open the first nine pinned pages, in sidebar order
@@ -651,6 +657,10 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self.now_playing.scratchEnded.connect(self._st_scratch_end)
         self.now_playing.seekTo.connect(self._st_seek)
         self.now_playing.opened.connect(lambda: self._nav_click("sound"))
+        self.now_playing.likeToggled.connect(self._st_like_current)
+        self.now_playing.shuffleToggled.connect(self._queue_set_shuffle)
+        self.now_playing.repeatCycled.connect(self._queue_cycle_repeat)
+        self.now_playing.queueOpened.connect(self._st_show_queue)
         outer.addWidget(self.now_playing)
         outer.addWidget(footer)
         self._refresh_nav_dots()
@@ -961,6 +971,9 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         # the old page drifts up when the new one is further down the sidebar, down when it is further up
         further_up = key in order and before in order and order.index(key) < order.index(before)
         self._place_perf(key)
+        sound = key == "sound"
+        self._inner_lay.setStretch(0, 1 if sound else 0)  # the page takes the whole height, or stays as tall as its content
+        self._inner_lay.setStretch(self._inner_lay.count() - 1, 0 if sound else 1)
         self.stack.setCurrentWidget(self.pages[key], 1 if further_up else -1)
         motion.set_visible(self.markers, key == "dl", axis="width")  # only Files & Torrents uses yt-dlp, ffmpeg and a debrid service
         title, blurb = PAGE_INFO[key]
@@ -973,6 +986,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         self.page_blurb.setToolTip(PAGE_DETAIL.get(key, ""))  # what the page really does, in the app's own words
         self.page_chip.setText(PAGE_CHIP.get(key, "").upper())
         motion.fade(self.page_chip, bool(PAGE_CHIP.get(key)))
+        self.page_header.setVisible(key != "sound")  # a player has no form-page title block: Resonance names itself in its tab row
         for group, items in NAV_GROUPS:  # make sure the group holding this page is expanded
             if any(k == key for k, _t in items) and not self.nav_groups[group]["header"].open and self._group_has_pins(group):
                 self._toggle_group(group)
@@ -1046,7 +1060,8 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
         if not self.is_processing and not self.org_busy and mode != "dl":  # the idle label follows the page
             self.lbl_total_prog.setText("Organise Progress: 0 / 0" if mode == "org" else "Batch Progress: 0 / 0")
         motion.set_visible(self.perf, mode not in ("dl", "org", "games", "recomps", "emus"))
-        motion.set_visible(self.bar_wrap, mode not in ("games", "recomps", "emus"))
+        motion.set_visible(self.st_dock, page == "sound")
+        motion.set_visible(self.bar_wrap, mode not in ("games", "recomps", "emus") and page != "sound")  # the Distill Resonance page has no Start / Pause / Stop (it is being reworked)
         self._apply_panel_mode(mode)
         self._sync_run_controls()
 
@@ -1169,7 +1184,7 @@ class DistillWindow(DropMixin, RunMixin, OrganizeMixin, PatchViewMixin, Download
             form(card, "Folder layout", self.pkg_layout)
             card.add(hint('One folder per PKG, named after the file. shadPS4 layout: game, -UPDATE folder, and addcont for DLC.', tip='One folder per PKG: named after each file.  |  shadPS4 layout: a game in CUSAxxxxx, its update in CUSAxxxxx-UPDATE, DLC in addcont/CUSAxxxxx/<label>.'))
             card.add(self.pkg_merge)
-            card.add(hint('A game and its updates (same title ID) become one patched game folder, updates applied in version order.', tip="A game and the updates for it in the source folder (same title ID) become one patched game folder: each update is laid over the game in version order and the game's param.sfo takes the newest version. The update .pkg files are used up (deleted with the game if you ticked that); an update with no game in the folder is extracted on its own."))
+            card.add(hint('A game and its updates (same title ID) become one patched game folder, updates applied in version order.', tip="A game and the updates for it in the source folder (same title ID) become one patched game folder: each update is laid over the game in version order and the game's param.sfo takes the newest version. The update .pkg files are used up (deleted with the game if you selected that); an update with no game in the folder is extracted on its own."))
             card.add(self.pkg_zar)
             card.add(hint('Each extraction is checked and packed into one <name>.zar (shadPS4 0.17+), then the folder is removed.', tip='Each extraction is checked, packed into one <name>.zar with ZArchive (shadPS4 0.17+ reads it directly) and the extracted folder is removed.'))
             side_lay.addWidget(card)

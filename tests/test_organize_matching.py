@@ -112,7 +112,7 @@ class MultiDiscTests(Tree):
         findings, message = find_multidisc(self.root, True, {"loose": True}, NEVER)
         self.assertFalse(findings[0].checked)
         self.assertIn("similar names", findings[0].note)
-        self.assertIn("unticked", message)
+        self.assertIn("deselected", message)
 
     def test_loose_mode_does_not_pair_sequels_or_other_regions(self):
         self.make("Final Fantasy VII (Disc 1).chd")

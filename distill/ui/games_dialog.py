@@ -10,30 +10,51 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from .. import apikeys
-from .. import gameexport, gameimport
+from .. import gameexport, gameimport, streaming
 from .. import games as gm
 from .. import gamemedia
 from .. import recomps as rc
 from . import msgbox
 from .emu_cards import clear_layout
 from .frameless import FramelessDialog, hairline
+from .games_edit_tabs import EmulatorTab, MediaTab, tabs_css
 from .games_widgets import StarRating
 from .recomp_dialog import EMPTY_NOTE, REMOVED_NOTE, CoverSearchDialog, PosterBox, _caption, _icon_button, _stack, pick_picture
+from .tabs import MediaTabs
 from .theme import T
-from .widgets import AnimCheckBox, accent_button, hint
+from .widgets import AnimCheckBox, accent_button, hint, symbolize
+
+
+def _save_png(src: Path, dst: Path) -> bool:
+    """A copy of a poster as PNG, which is what Sunshine reads (Qt does the decoding, so WebP and JPEG posters work too)."""
+    image = QImage(str(src))
+    if image.isNull():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    return image.save(str(dst), "PNG")
 
 
 class EditGameDialog(FramelessDialog):
     _found = Signal(int, object, str)  # (lookup number, [gm.Match] or None, what went wrong), sent from the worker thread
 
-    def __init__(self, parent: QWidget, game: gm.Game, systems: list[str], sgdb_key: str = "", cover: QPixmap | None = None):
+    def __init__(self, parent: QWidget, game: gm.Game, systems: list[str], sgdb_key: str = "", cover: QPixmap | None = None, *, media_key: str = "",
+                 emu_info: Callable[[str], gm.EmulatorOptions] | None = None, manage: Callable[[], None] | None = None):
+        """`media_key` (the name the game's pictures are kept under) adds the Media tab; `emu_info` (what can play a platform) adds the Emulator tab,
+        and `manage` opens the Platform setup window from it."""
         super().__init__(parent, "Edit game", "edit", (820, 760), (700, 560))
         self.game, self.sgdb_key = game, sgdb_key
+        self.media_plan = gamemedia.MediaPlan()  # what the Media tab was told to do: carried out by the page when Save is pressed
+        self.emulator: str | None = None  # the launch choice Save was pressed with ('' = automatic); None = unchanged
+        self.chosen_emulator = ""  # the launch choice the Emulator tab shows when Save is pressed ('' = automatic)
+        self.make_default = False  # make that choice the platform's default
+        self.launch_args: dict[str, str] = {}  # launch options changed on the Emulator tab: emulator id -> options ('' = Distill's own)
+        self.media_tab: MediaTab | None = None
+        self.emu_tab: EmulatorTab | None = None
         self.values: dict[str, str | int | None] | None = None  # what Save was pressed with (see gm.GameStore.update_details)
         self.cover_data: bytes | None = None  # a cover chosen here, to be kept when Save is pressed
         self.cover_off = False  # the cover that is kept on disk is to be taken off
@@ -56,7 +77,6 @@ class EditGameDialog(FramelessDialog):
         body_host.setObjectName("gameBody")
         body_host.setStyleSheet("#gameBody { background: transparent; }")
         scroll.setWidget(body_host)
-        outer.addWidget(scroll, 1)
         top = QHBoxLayout(body_host)
         top.setContentsMargins(20, 18, 20, 18)
         top.setSpacing(24)
@@ -92,6 +112,7 @@ class EditGameDialog(FramelessDialog):
         self.look_btn = accent_button("Look up")
         self.look_btn.setAutoDefault(False)
         self.look_btn.setToolTip("Search the LaunchBox Games Database for this name. It fills in the platform, developer, publisher, year and genre.")
+        symbolize(self.look_btn, "search", width=48)
         self.look_btn.clicked.connect(lambda: self._look(force=True))
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -155,6 +176,26 @@ class EditGameDialog(FramelessDialog):
         right.addWidget(hint(f"File: {game.path}"))
         right.addStretch(1)
 
+        self.tabs = MediaTabs()
+        T.bind_css(self.tabs, tabs_css)
+        self.tabs.addTab(scroll, "Details")
+        if media_key:
+            self.media_tab = MediaTab(media_key, self._media_lookup, sgdb_key,
+                                      {"find": lambda: self._cover_menu(self.media_tab.cover_row.find_btn), "file": self._upload_cover, "remove": self._remove_cover},
+                                      self.media_plan)
+            self.media_tab.set_cover(cover)
+            self.tabs.addTab(self.media_tab, "Media")
+        if emu_info is not None:
+            self.emu_tab = EmulatorTab(game.emulator, lambda: self.system.currentText().strip(), emu_info, manage)
+            self.tabs.addTab(self.emu_tab, "Emulator")
+        self._tabs_timer = QTimer(self)  # the platform changing (typed, picked, or filled in by a lookup) updates the other tabs, once typing pauses
+        self._tabs_timer.setSingleShot(True)
+        self._tabs_timer.setInterval(350)
+        self._tabs_timer.timeout.connect(self._refresh_tabs)
+        self.system.currentTextChanged.connect(lambda _t: self._tabs_timer.start())
+        self.tabs.tabBar().setVisible(self.tabs.count() > 1)  # (a window opened without them looks as it always did)
+        outer.addWidget(self.tabs, 1)
+
         self.problem = QLabel()
         self.problem.setWordWrap(True)
         self.problem.setTextFormat(Qt.TextFormat.RichText)
@@ -187,7 +228,19 @@ class EditGameDialog(FramelessDialog):
 
     def done(self, result: int) -> None:
         self._alive = False
+        if self.media_tab is not None:
+            self.media_tab.closing()
         super().done(result)
+
+    def _refresh_tabs(self) -> None:
+        for tab in (self.media_tab, self.emu_tab):
+            if tab is not None:
+                tab.refresh()
+
+    def _media_lookup(self) -> tuple[str, str, str]:
+        """(name, LaunchBox platform, platform) as the Details tab has them now: what the Media tab searches for."""
+        system = self.system.currentText().strip()
+        return (self.name.text().strip() or self.game.title, gm.LB_PLATFORM_NAMES.get(system, "" if system in ("", gm.UNKNOWN) else system), system)
 
     def _say(self, text: str, kind: str = "bad") -> None:
         colour = {"bad": T.bad, "warn": T.warn, "ok": T.ok}[kind].name()
@@ -207,12 +260,15 @@ class EditGameDialog(FramelessDialog):
         self.cover_data, self.cover_off = data, False
         self.problem.setVisible(False)
         self._cover_buttons()
+        if self.media_tab is not None:
+            self.media_tab.set_cover(pix)
 
-    def _cover_menu(self) -> None:
+    def _cover_menu(self, anchor: QWidget | None = None) -> None:
         menu = QMenu(self)
         menu.addAction("LaunchBox Games Database...", self._search_launchbox)
         menu.addAction("SteamGridDB...", self._search_sgdb)
-        menu.exec(self.search_btn.mapToGlobal(self.search_btn.rect().bottomLeft()))
+        button = anchor if isinstance(anchor, QWidget) else self.search_btn  # (a button's clicked signal passes a bool, not a widget)
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
     def _search_launchbox(self) -> None:
         system = self.system.currentText().strip()
@@ -252,6 +308,8 @@ class EditGameDialog(FramelessDialog):
         self.poster.set_note(REMOVED_NOTE if self.cover_off else EMPTY_NOTE)
         self.problem.setVisible(False)
         self._cover_buttons()
+        if self.media_tab is not None:
+            self.media_tab.set_cover(None)
 
     # ---- looking the name up ----------------------------------------------------------------------------------
     def _name_done(self) -> None:
@@ -267,8 +325,7 @@ class EditGameDialog(FramelessDialog):
         self._looked_for = title
         self._serial += 1
         serial, system = self._serial, self.system.currentText().strip()
-        self.look_btn.setEnabled(False)
-        self.look_btn.setText("Looking...")
+        self.look_btn.setEnabled(False)  # (the line below the name says it is searching)
         self.status.setText("Searching the LaunchBox Games Database...")
 
         def work() -> None:
@@ -291,7 +348,6 @@ class EditGameDialog(FramelessDialog):
         if serial != self._serial:
             return
         self.look_btn.setEnabled(True)
-        self.look_btn.setText("Look up")
         self.results.clear()
         self._matches = list(matches or [])
         self.results.setVisible(bool(self._matches))
@@ -355,6 +411,12 @@ class EditGameDialog(FramelessDialog):
             "developer": self.developer.text(), "publisher": self.publisher.text(), "year": year, "genre": self.genre.text(),
             "rating": self.stars.value(), "status": str(self.status_box.currentData() or ""), "notes": self.notes.toPlainText(),
         }
+        if self.emu_tab is not None:
+            choice = self.emu_tab.choice()
+            self.chosen_emulator = choice
+            self.emulator = choice if choice != (self.game.emulator or "") else None
+            self.make_default = bool(choice) and self.emu_tab.default_requested()
+            self.launch_args = self.emu_tab.launch_args()
         self.accept()
 
 
@@ -439,6 +501,7 @@ class PlatformSetupDialog(FramelessDialog):
         self.bios_text.setTextFormat(Qt.TextFormat.RichText)
         self.bios_open = QPushButton("Open the BIOS folder")
         self.bios_open.setAutoDefault(False)
+        symbolize(self.bios_open, "folder-open", "Open the BIOS folder")
         self.bios_open.clicked.connect(self._open_bios)
         bios.addWidget(self.bios_text)
         bios.addWidget(self.bios_open, 0, Qt.AlignmentFlag.AlignLeft)
@@ -452,6 +515,7 @@ class PlatformSetupDialog(FramelessDialog):
         again = QPushButton("Check again")
         again.setAutoDefault(False)
         again.setToolTip("Look at the emulators and BIOS files again, after you have installed or copied something.")
+        symbolize(again, "refresh")
         again.clicked.connect(self.refresh)
         done = accent_button("Done")
         done.setAutoDefault(False)
@@ -623,15 +687,17 @@ class LibrariesDialog(FramelessDialog):
         add = accent_button("Add folder...")
         add.setAutoDefault(False)
         add.clicked.connect(self._add)
+        symbolize(add, "plus", "Add a folder of games")
         bring = QPushButton("Import / export")  # history from another front end, and the library out to one
         bring.setAutoDefault(False)
         bring.setToolTip("Bring your favourites, play time, stars and collections across from LaunchBox or Playnite (only games already in your library are updated), "
-                         "or write your library out as RetroArch playlists.")
+                         "or write your library out as RetroArch playlists, or as apps for Sunshine so Moonlight can stream it.")
         menu = QMenu(bring)
         menu.addAction("Import history from LaunchBox...", self._import_launchbox)
         menu.addAction("Import history from Playnite...", self._import_playnite)
         menu.addSeparator()
         menu.addAction("Export RetroArch playlists...", self._export_retroarch)
+        menu.addAction("Export to Sunshine (Moonlight)...", self._export_sunshine)
         bring.setMenu(menu)
         done = QPushButton("Done")
         done.setAutoDefault(False)
@@ -702,6 +768,7 @@ class LibrariesDialog(FramelessDialog):
         change = QPushButton("Change...")
         change.setAutoDefault(False)
         change.clicked.connect(self._change_romm_folder)
+        symbolize(change, "folder-open", "Change the folder")
         lay.addWidget(change, 0, Qt.AlignmentFlag.AlignVCenter)
         return row
 
@@ -765,6 +832,34 @@ class LibrariesDialog(FramelessDialog):
             return
         QApplication.restoreOverrideCursor()
         msgbox.information(self, "Export RetroArch playlists", report.summary())
+
+    def _export_sunshine(self) -> None:
+        found = streaming.find_apps_file()
+        text = ("Distill adds your installed PC recomps and games to Sunshine's app list, with their posters, so Moonlight shows them as a grid. Each one "
+                "starts through Distill, so it uses the emulator, core and options you set here and the play time is counted. Apps already in the file "
+                "are left alone, nothing is removed, and the file is backed up before its first change.")
+        buttons = [("Favourites and recomps", "accept"), ("Whole library and recomps", "action"), ("Cancel", "reject")]
+        pick, _tick = msgbox.ask(self, "info", "Export to Sunshine", text, buttons, default=0, escape=2,
+                                 informative=f"Sunshine's app list: {found}" if found is not None else
+                                 "Distill couldn't find Sunshine's apps.json, so you'll be asked where it is.")
+        if pick not in (0, 1):
+            return
+        path = found
+        if path is None:
+            chosen, _f = QFileDialog.getOpenFileName(self, "Choose Sunshine's apps.json", "", "JSON files (*.json);;All files (*)")
+            if not chosen:
+                return
+            path = Path(chosen)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            report = streaming.export_sunshine(self.store, path, rc.Store(), favourites_only=(pick == 0), to_png=_save_png)
+        except OSError as exc:
+            QApplication.restoreOverrideCursor()
+            msgbox.warning(self, "Export to Sunshine", f"Couldn't write {path}: {exc}\n\nSunshine's folder in Program Files usually needs an administrator: "
+                           "run Distill as administrator for this, or ask Sunshine's own web page to add the apps instead.")
+            return
+        QApplication.restoreOverrideCursor()
+        msgbox.information(self, "Export to Sunshine", report.summary())
 
     def _run_import(self, source: str, read: Callable[[], list]) -> None:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -982,6 +1077,7 @@ class LaunchBoxCoverDialog(FramelessDialog):
         go = accent_button("Search")
         go.setAutoDefault(False)
         go.clicked.connect(self._search)
+        symbolize(go, "search", width=48)
         row.addWidget(self.term, 1)
         row.addWidget(go)
         outer.addLayout(row)

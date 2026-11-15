@@ -26,8 +26,15 @@ keys/
 # Everything the app writes next to itself when run from a source checkout
 /tools/
 /recomps/
+/changes/
 /icon_cache/
+/game_media/
+//disc_covers/
+/clean_for_sharing.bat/
 /pkg_logs/
 /distill_*
 /ps3_names.json
 *.part
+
+# Dev-tool output
+/devtools/khinsider_probe_report.txt

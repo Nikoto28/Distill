@@ -1344,9 +1344,21 @@ class Installer:
     def folder_for(self, rc: Recomp) -> Path:
         return root() / "games" / rc.id
 
+    def _guard(self, rc: Recomp) -> None:
+        cur = self.store.installed(rc.id)
+        if cur and cur.linked == "file":
+            raise RecompError(f"{rc.name} sits in a folder shared with other programs, so Distill won't update it. "
+                              "Move it into a folder of its own, then link it again.")
+
     def live_for(self, rc: Recomp) -> Path:
-        """Where the unpacked files end up. Subclasses may point this at a folder the person chose."""
-        return self.folder_for(rc) / "app"
+        """Where the unpacked files end up: an update goes where the project already is (linked or not); a fresh install goes to
+        <Recomps folder>/<Name> when the person has chosen one, else into Distill's own folder. Subclasses may override this."""
+        self._guard(rc)
+        cur = self.store.installed(rc.id)
+        if cur:
+            return Path(cur.folder)
+        folder = recomps_root(self.store)
+        return folder / folder_name(rc) if folder else self.folder_for(rc) / "app"
 
     def record_for(self, rc: Recomp, rel: Release, asset: dict, live: Path, exe: Path) -> Installed:
         return Installed(rc.id, rel.tag, str(live), exe.relative_to(live).as_posix(), time.time())
@@ -1356,6 +1368,7 @@ class Installer:
 
     def check_asset(self, rc: Recomp, asset: dict) -> None:
         """Called before anything is downloaded; raise RecompError to refuse the file."""
+        self._guard(rc)
 
     def download(self, asset: dict, dest: Path) -> None:
         req = urllib.request.Request(asset["url"], headers={"User-Agent": USER_AGENT})
@@ -1423,9 +1436,259 @@ class Installer:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-def uninstall(store: Store, rc: Recomp) -> None:
+def uninstall(store: Store, rc: Recomp) -> str:
+    """Remove an install Distill made. A project the person linked is only forgotten, never deleted. Returns a sentence saying
+    what happened."""
+    inst = store.installed(rc.id)
+    if inst is not None and inst.linked:
+        store.set_installed(None, rc.id)
+        return "Removed from Distill. Your files were left where they are."
+    if inst is not None:
+        folder = Path(inst.folder)
+        try:
+            here = folder.resolve()
+            homes = [m.resolve() for m in managed_roots(store)]
+            # only inside a folder Distill installs into, and never that folder itself
+            if any(m in here.parents for m in homes) and here not in homes:
+                shutil.rmtree(folder, ignore_errors=True)
+        except OSError:
+            pass
     shutil.rmtree(root() / "games" / rc.id, ignore_errors=True)
     store.set_installed(None, rc.id)
+    return "Uninstalled."
+
+
+# ---- the Recomps folder, and installs the person already has ----------------------------------------------------
+SCAN_SKIP = {"saves", "savestates", "shaders", "cache", "mods", "logs", "screenshots", "textures", "roms", "rom", "node_modules",
+             ".git", "$recycle.bin", "system volume information"}
+SCAN_DEPTH = 2
+EXE_DEPTH = 3  # how far into a project's folder to look for its program
+_ILLEGAL_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def recomps_root(store: Store) -> Path | None:
+    """The folder the person chose to keep their recomps in, if any."""
+    v = store.get("rc_root")
+    return Path(str(v)) if v else None
+
+
+def set_recomps_root(store: Store, path: Path | str | None) -> None:
+    """Choose (or, with None, clear) the Recomps folder. Folders chosen before are remembered, so a project Distill installed into
+    one of them can still be uninstalled after the choice changes."""
+    if path:
+        past = [x for x in store.get("rc_past_roots") or [] if isinstance(x, str)]
+        if (old := recomps_root(store)) and str(old) not in past:
+            past.append(str(old))
+        store.put("rc_past_roots", past)
+    store.put("rc_root", str(path) if path else "")
+
+
+def managed_roots(store: Store) -> list[Path]:
+    """Folders Distill itself installs projects into: its own, the Recomps folder, and the ones used before."""
+    out = [root()]
+    for v in (store.get("rc_root"), *(store.get("rc_past_roots") or [])):
+        if isinstance(v, str) and v and Path(v) not in out:
+            out.append(Path(v))
+    return out
+
+
+def folder_name(rc: Recomp) -> str:
+    return _ILLEGAL_NAME.sub("", rc.name).strip(" .") or rc.id
+
+
+def update_available(inst: Installed | None, latest_tag: str) -> bool:
+    """A project whose version isn't known (one the person already had) is never reported as out of date: there is nothing to compare."""
+    return bool(inst and inst.version and is_newer(inst.version, latest_tag))
+
+
+@dataclass(slots=True)
+class Found:
+    id: str
+    folder: str
+    exe: str  # relative to folder
+    linked: str  # "folder" | "file"
+    version: str = ""
+    released: tuple[str, ...] = ()  # link(): projects that had been pointed at this same program and no longer are
+
+
+def _spaced(text: str) -> str:
+    return " ".join(w for w in _TOKEN_SPLIT.split(text.lower()) if w)
+
+
+def _compact(text: str) -> str:
+    return _TOKEN_SPLIT.sub("", text.lower())
+
+
+class _Matcher:
+    """Does a folder or file name look like one of this project's names?"""
+
+    def __init__(self, rc: Recomp):
+        names = {rc.id, rc.name, rc.repo.split("/")[-1]}
+        self.forms = [(_spaced(n), _compact(n)) for n in names if len(_compact(n)) >= 3]
+
+    def __call__(self, name: str) -> int:
+        """0 = no, else how many characters of the name matched (a longer match beats a shorter one)."""
+        spaced, compact, best = _spaced(name), _compact(name), 0
+        for sp, co in self.forms:
+            if spaced == sp or spaced.startswith(sp + " ") or compact == co or (compact.startswith(co) and compact[len(co)].isdigit()):
+                best = max(best, len(co))
+        return best
+
+
+def _version_in_name(name: str) -> str:
+    m = re.search(r"(?<![\w.])v?(\d+(?:\.\d+){1,3})(?![\w])", name)
+    return m.group(1) if m else ""
+
+
+def locate_exe(folder: Path, rc: Recomp, plat: str = "", depth: int = EXE_DEPTH) -> Path | None:
+    """The file to run inside a project's folder. Looks a few levels down only, and not into folders that hold saves or mods."""
+    plat = plat or platform_key()
+    rx = re.compile(rc.exe, re.IGNORECASE) if rc.exe else None
+    cands: list[Path] = []
+    base = len(folder.parts)
+    for dirpath, dirnames, filenames in os.walk(folder):
+        here = Path(dirpath)
+        level = len(here.parts) - base
+        if plat == "macos":
+            apps = [d for d in dirnames if d.lower().endswith(".app")]
+            cands += [here / d for d in apps]
+            dirnames[:] = [d for d in dirnames if not d.lower().endswith(".app")]
+        dirnames[:] = [d for d in dirnames if d.lower() not in SCAN_SKIP] if level < depth else []
+        for fn in filenames:
+            p = here / fn
+            if rx:
+                if rx.search(p.relative_to(folder).as_posix()):
+                    cands.append(p)
+                continue
+            low = fn.lower()
+            if _NOT_THE_GAME.search(fn):
+                continue
+            if plat == "windows" and low.endswith(".exe") or plat == "linux" and (low.endswith(".appimage") or "." not in low and _looks_executable(p)):
+                cands.append(p)
+    if rx and plat == "macos":
+        cands = [p for p in cands if rx.search(p.relative_to(folder).as_posix())]
+    if not cands:
+        return None
+    words = {w for w in _TOKEN_SPLIT.split(f"{rc.name} {rc.repo} {rc.id}".lower()) if len(w) > 2}
+
+    def score(p: Path) -> tuple:
+        stem = set(_TOKEN_SPLIT.split(p.stem.lower()))
+        try:
+            when = p.stat().st_mtime
+        except OSError:
+            when = 0.0
+        return (len(stem & words), -len(p.relative_to(folder).parts), when)  # newest wins, so an update beats the old version beside it
+    return max(cands, key=score)
+
+
+def _is_program(p: Path, plat: str) -> bool:
+    low = p.name.lower()
+    return low.endswith(".exe") if plat == "windows" else low.endswith(".app") if plat == "macos" else low.endswith(".appimage")
+
+
+def scan_folder(folder_: Path, catalog: Iterable[Recomp], plat: str = "", depth: int = SCAN_DEPTH,
+                stop: Callable[[], bool] = lambda: False) -> dict[str, Found]:
+    """Projects already in `folder_`: a folder named like one (Ship of Harkinian, 2ship-v3.0) with its program inside, or a loose
+    AppImage / exe named like one. The first match for each project wins."""
+    plat = plat or platform_key()
+    matchers = {r.id: (r, _Matcher(r)) for r in catalog if plat in r.platforms}
+    found: dict[str, Found] = {}
+
+    def best(name: str) -> Recomp | None:
+        score, r = max(((m(name), r) for r, m in matchers.values()), key=lambda t: t[0], default=(0, None))
+        return r if score else None
+
+    def walk(here: Path, left: int) -> None:
+        try:
+            kids = sorted(here.iterdir(), key=lambda p: p.name.casefold())
+        except OSError:
+            return
+        for kid in kids:
+            if stop():
+                return
+            if kid.name.startswith(".") or kid.name.lower() in SCAN_SKIP:
+                continue
+            try:
+                is_dir = kid.is_dir()
+            except OSError:
+                continue
+            if is_dir and kid.suffix.lower() != ".app":
+                r = best(kid.name)
+                if r and r.id not in found and (exe := locate_exe(kid, r, plat)):
+                    found[r.id] = Found(r.id, str(kid), exe.relative_to(kid).as_posix(), "folder", _version_in_name(kid.name) or _version_in_name(exe.name))
+                elif not r and left > 1:
+                    walk(kid, left - 1)
+            elif _is_program(kid, plat):
+                r = best(kid.stem)
+                if r and r.id not in found:
+                    found[r.id] = Found(r.id, str(here), kid.name, "file", _version_in_name(kid.stem))
+    walk(folder_, depth)
+    return found
+
+
+def scan_all(store: Store, catalog: Iterable[Recomp], plat: str = "", stop: Callable[[], bool] = lambda: False) -> dict[str, Found]:
+    """What is already in the Recomps folder (nothing, if none has been chosen)."""
+    folder = recomps_root(store)
+    return scan_folder(folder, list(catalog), plat, SCAN_DEPTH, stop) if folder and folder.is_dir() else {}
+
+
+def _program_key(folder: str, exe: str) -> str:
+    return os.path.normcase(os.path.normpath(os.path.join(folder, exe)))
+
+
+def others_at(store: Store, rid: str, folder: str, exe: str) -> list[str]:
+    """The ids of other projects the store records at this very program. One program is one project."""
+    key = _program_key(folder, exe)
+    out = []
+    for other in list((store.data.get("installed") or {})):
+        if other != rid and (inst := store.installed(other)) is not None and _program_key(inst.folder, inst.exe) == key:
+            out.append(other)
+    return out
+
+
+def apply_scan(store: Store, found: dict[str, Found]) -> list[str]:
+    """Remember what a scan found. An install whose files are still there is kept; a missing or new one is set. Returns the ids
+    that are newly linked."""
+    new = []
+    for rid, f in found.items():
+        cur = store.installed(rid)
+        if cur and cur.exe_path().exists():
+            continue
+        if others_at(store, rid, f.folder, f.exe):
+            continue  # another project already has this program: a name match doesn't take it
+        store.set_installed(Installed(rid, f.version, f.folder, f.exe, time.time(), f.linked))
+        new.append(rid)
+    return new
+
+
+def link(store: Store, rc: Recomp, path: Path | str, plat: str = "") -> Found:
+    """Point Distill at an install the person chose by hand: its program, or the folder holding it."""
+    plat = plat or platform_key()
+    path = Path(path)
+    if path.is_dir() and path.suffix.lower() != ".app":
+        exe = locate_exe(path, rc, plat)
+        if exe is None:
+            raise RecompError(f"Found nothing to run for {rc.name} in that folder.")
+        folder = path
+    elif path.exists():
+        exe, folder = path, path.parent
+    else:
+        raise RecompError("That file or folder doesn't exist.")
+    shared = {Path.home()}
+    if chosen := recomps_root(store):
+        shared.add(chosen)
+    kind = "file" if folder in shared else "folder"  # a program sitting loose in a shared folder: never merge updates into it
+    rel = exe.relative_to(folder).as_posix()
+    rivals = others_at(store, rc.id, str(folder), rel)
+    for other in rivals:
+        held = store.installed(other)
+        if held is not None and not held.linked:
+            raise RecompError(f"That is the copy Distill installed for {other}, so it can't also be {rc.name}.")
+    version = _version_in_name(folder.name) or _version_in_name(exe.name) if kind == "folder" else _version_in_name(exe.stem)
+    store.set_installed(Installed(rc.id, version, str(folder), rel, time.time(), kind))
+    for other in rivals:  # the person has said what this program is: whoever else was pointed at it lets go
+        store.set_installed(None, other)
+    return Found(rc.id, str(folder), rel, kind, version, tuple(rivals))
 
 
 def _is_console_exe(exe: Path) -> bool:
@@ -1442,7 +1705,9 @@ def _is_console_exe(exe: Path) -> bool:
     return len(pe) >= 24 + 70 and pe[:4] == b"PE\0\0" and int.from_bytes(pe[24 + 68:24 + 70], "little") == 3
 
 
-def launch(inst: Installed) -> None:
+def launch(inst: Installed, detach: bool = True) -> subprocess.Popen:
+    """Start an installed project. With `detach` off it stays in the caller's process tree (and on a Mac `open` waits for it to quit), which is
+    what `distill --launch` needs so that whatever started it, Sunshine for one, can tell when the game ends."""
     exe = inst.exe_path()
     if not exe.exists():
         raise RecompError("The game's files are missing. Install it again.")
@@ -1451,16 +1716,16 @@ def launch(inst: Installed) -> None:
     if sys.platform == "win32":
         if _is_console_exe(exe):
             flags, quiet = subprocess.CREATE_NEW_CONSOLE, {}  # as when double-clicked: its own console, its own streams
-        else:
+        elif detach:
             flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         cmd = [str(exe)]
     elif sys.platform == "darwin" and exe.suffix == ".app":
-        cmd = ["open", str(exe)]
+        cmd = ["open", str(exe)] if detach else ["open", "-W", str(exe)]
     else:
         cmd = [str(exe)]
     try:
-        subprocess.Popen(cmd, cwd=str(exe.parent), creationflags=flags, close_fds=True,
-                         start_new_session=(sys.platform != "win32"), **quiet)
+        return subprocess.Popen(cmd, cwd=str(exe.parent), creationflags=flags, close_fds=True,
+                                start_new_session=(detach and sys.platform != "win32"), **quiet)
     except OSError as exc:
         raise RecompError(f"Couldn't start it: {exc}") from exc
 
@@ -1584,7 +1849,7 @@ def _ext_of(data: bytes) -> str:
 _LB_SEARCH = "https://gamesdb.launchbox-app.com/games/results/"
 _LB_DETAIL = "https://gamesdb.launchbox-app.com/games/details/"
 _LB_IMAGES = "https://gamesdb.launchbox-app.com/games/images/"
-_LB_IMG = re.compile(r"https?://images\.launchbox-app\.com/[0-9a-f-]{36}\.(?:jpg|jpeg|png)", re.IGNORECASE)
+_LB_IMG = re.compile(r"https?://(?:images\.launchbox-app\.com|gamesdb-images\.launchbox\.gg)/+(?:r2_)?[0-9a-f-]{36}\.(?:jpg|jpeg|png|webp)", re.IGNORECASE)  # (two hosts; the older pictures are written with a double slash)
 _LB_LINK = re.compile(r"/games/(?:details|images)/(\d+)(?:-([a-z0-9-]+))?", re.IGNORECASE)
 _OG_IMG = re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', re.IGNORECASE)
 LB_PLATFORMS = {"GameCube": "Nintendo GameCube", "Wii": "Nintendo Wii", "Xbox": "Microsoft Xbox", "Xbox 360": "Microsoft Xbox 360",

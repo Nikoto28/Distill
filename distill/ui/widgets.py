@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import (QColor, QFont, QGradient, QImage, QKeyEvent, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QPolygonF,
+from PySide6.QtGui import (QColor, QFont, QGradient, QIcon, QImage, QKeyEvent, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QPolygonF,
                            QFontMetrics, QPixmap, QWheelEvent)
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractItemView, QCheckBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from ..constants import APP_DIR
 from ..system import resolve_tool_path
-from . import icons, motion
+from . import framemath, icons, motion
 from .icon import app_icon_pixmap
 from .theme import AlignL, AlignR, AlignV, T
 
@@ -488,8 +488,8 @@ class AuraButton(_KeyFocus, QPushButton):
         self._sat_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
         self._sat_anim.valueChanged.connect(self._set_sat)
         self._scale = 1.0
-        self._tick_timer = QTimer(self)
-        self._tick_timer.setInterval(33)
+        self._clock = motion.FrameClock()
+        self._tick_timer = motion.frame_timer(self)
         self._tick_timer.timeout.connect(self._tick)
         self._press = QVariantAnimation(self, duration=90)
         self._press.valueChanged.connect(self._set_scale)
@@ -510,7 +510,8 @@ class AuraButton(_KeyFocus, QPushButton):
         self._glow_goal = (0.45 if paused else 1.0) if running else (0.30 if self.isEnabled() else 0.0)
         moving = running and not paused and motion.on() and self.isVisible()
         if moving and not self._tick_timer.isActive():
-            self._tick_timer.start()
+            self._clock.reset()
+            self._tick_timer.start(motion.frame_ms(self))
         elif not moving:
             self._tick_timer.stop()
         self.update()
@@ -531,9 +532,16 @@ class AuraButton(_KeyFocus, QPushButton):
         self._sat = float(value)
         self.update()
 
+    DRIFT_RATE = 0.0035 * 30  # of a full drift a second (about nine seconds for one): what 0.0035 a frame was at 30 fps
+    GLOW_RATE = framemath.rate_per_frame(0.12, 30)  # how fast the glow eases to where it is going: 12 % of the way a frame at 30 fps
+
     def _tick(self) -> None:
-        self._phase = (self._phase + 0.0035) % 1.0  # one full drift in about nine seconds
-        self._glow += (self._glow_goal - self._glow) * 0.12
+        self.advance(self._clock.dt())
+
+    def advance(self, dt: float) -> None:
+        """Move the drift and the glow on by `dt` seconds."""
+        self._phase = (self._phase + self.DRIFT_RATE * dt) % 1.0
+        self._glow = framemath.follow(self._glow, self._glow_goal, self.GLOW_RATE, dt)
         self.update()
 
     def showEvent(self, event) -> None:
@@ -619,6 +627,33 @@ def accent_button(text: str) -> QPushButton:
     button = QPushButton(text)
     button.setProperty("accent", True)
     button.setMinimumHeight(38)
+    return button
+
+
+def symbolize(button: QPushButton, name: str, tip: str = "", width: int = 46, danger: bool = False) -> QPushButton:
+    """Turn a button that has words on it into one with just a symbol (`name` is an icons.PATHS name), for less text on the screen. The
+    words move to where they are still found: the tooltip (unless `tip` or an earlier tooltip says more) and the accessible name, so a
+    screen reader and a hover both still say what it does. It stays the same button: its clicks, its enabled state and its place in a
+    layout are untouched. Do not setText() it afterwards (a button whose words change is not a candidate for this)."""
+    words = button.text().replace("&", "").strip()
+    label = words.rstrip(".\u2026 ") or words
+    button.setAccessibleName(label)
+    button.setToolTip(tip or button.toolTip() or label)
+    button.setText("")
+    height = max(button.minimumHeight(), 36)
+    button.setFixedSize(width, height)
+    button.setIconSize(QSize(18, 18))
+    button.setStyleSheet("padding: 0;")  # the global button padding would crowd the icon out
+
+    def paint() -> None:
+        accent = bool(button.property("accent"))
+        colour = "#ffffff" if accent else (T.bad if danger else T.fg)
+        glyph = QIcon()
+        glyph.addPixmap(icons.pixmap(name, colour, 18), QIcon.Mode.Normal)
+        glyph.addPixmap(icons.pixmap(name, T.disabled_fg, 18), QIcon.Mode.Disabled)
+        button.setIcon(glyph)
+
+    T.bind(button, paint)
     return button
 
 
@@ -831,6 +866,7 @@ class PathRow(QWidget):
         self.edit.setPlaceholderText(placeholder)
         self.button = QPushButton("Browse...")
         self.button.clicked.connect(self._browse)
+        symbolize(self.button, "folder-open", "Browse...")
         row = QHBoxLayout()
         row.setSpacing(10)
         row.addWidget(self.edit, 1)
@@ -2304,16 +2340,63 @@ class BackdropView(QWidget):
     into the page's colour as it comes down behind the first card (like the colour wash on the Emulator page, but with the game's own
     picture)."""
     HEIGHT = 400
+    artChanged = Signal()  # a different picture (or none): panels that frost it should repaint
+
+    FADE_MS = 450  # how long a picture that arrives late takes to come in
 
     def __init__(self):
         super().__init__()
         self._src: QPixmap | None = None
         self._cache: tuple[tuple, QPixmap] | None = None
+        self._before: QPixmap | None = None  # the picture being faded away from, while one fades in
+        self._mix = 1.0  # how far the new picture has come in (1 = all of it)
+        self._fade: QVariantAnimation | None = None
 
-    def set_art(self, pix: QPixmap | None) -> None:
+    def set_art(self, pix: QPixmap | None, fade: bool = False) -> None:
+        """Show a different picture (or none). With `fade` the old one gives way to the new over a moment, for a picture that arrives while
+        the page is open; without it the change is at once, as when a page is opened."""
+        if self._fade is not None:
+            self._fade.stop()
+            self._fade = None
+        before = self._prepared() if fade and motion.on() and self.isVisible() else None
         self._src = pix if pix is not None and not pix.isNull() else None
         self._cache = None
+        self._before, self._mix = before, 1.0
+        if before is not None or (fade and motion.on() and self.isVisible()):
+            self._mix = 0.0
+            self._fade = QVariantAnimation(self, duration=self.FADE_MS, startValue=0.0, endValue=1.0)
+            self._fade.setEasingCurve(QEasingCurve.Type.InOutQuad)
+            self._fade.valueChanged.connect(self._fade_step)
+            self._fade.finished.connect(self._fade_done)
+            self._fade.start()
         self.update()
+        self.artChanged.emit()
+
+    def _fade_step(self, value) -> None:
+        self._mix = float(value)
+        self.update()
+
+    def _fade_done(self) -> None:
+        self._before, self._mix, self._fade = None, 1.0, None
+        self.update()
+
+    def frosted(self, rect: QRect) -> QPixmap:
+        """What lies behind `rect` (in this widget's coordinates), blurred: the picture is sampled a little wider than the rect, shrunk and
+        stretched back, so its edges blur with what is around them. Where there is no picture it is the page colour."""
+        out = QPixmap(rect.size())
+        out.fill(T.bg)
+        pix = self._prepared()
+        wide = rect.adjusted(-24, -24, 24, 24).intersected(pix.rect()) if pix is not None else QRect()
+        if pix is None or wide.isEmpty():
+            return out
+        src = pix.copy(wide)
+        small = src.scaled(max(1, src.width() // 9), max(1, src.height() // 9), Qt.AspectRatioMode.IgnoreAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation)
+        blur = small.scaled(src.size(), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        p = QPainter(out)
+        p.drawPixmap(wide.topLeft() - rect.topLeft(), blur)
+        p.end()
+        return out
 
     def _prepared(self) -> QPixmap | None:
         if self._src is None or self.width() < 20:
@@ -2335,7 +2418,7 @@ class BackdropView(QWidget):
         p.setOpacity(1.0)
         page = QColor(T.bg)
         fade = QLinearGradient(0, 0, 0, h)
-        for at, alpha in ((0.0, 95), (0.45, 150), (0.8, 235), (1.0, 255)):
+        for at, alpha in ((0.0, 125), (0.45, 175), (0.8, 240), (1.0, 255)):
             page.setAlpha(alpha)
             fade.setColorAt(at, QColor(page))
         p.fillRect(0, 0, w, h, fade)
@@ -2345,8 +2428,17 @@ class BackdropView(QWidget):
 
     def paintEvent(self, _event) -> None:
         pix = self._prepared()
+        if self._mix >= 1.0 or (pix is None and self._before is None):
+            if pix is not None:
+                QPainter(self).drawPixmap(0, 0, pix)
+            return
+        p = QPainter(self)  # part-way through a fade: the old picture under, the new one coming in over it
+        if self._before is not None:
+            p.setOpacity(1.0 if pix is not None else 1.0 - self._mix)
+            p.drawPixmap(0, 0, self._before)
         if pix is not None:
-            QPainter(self).drawPixmap(0, 0, pix)
+            p.setOpacity(self._mix)
+            p.drawPixmap(0, 0, pix)
 
 
 class ModalStack(QStackedWidget):

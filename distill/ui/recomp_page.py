@@ -7,7 +7,7 @@ import math
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, QUrl, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRect, QRectF, QSize, QStandardPaths, Qt, QTimer, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QCursor, QDesktopServices, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem, QMenu, QMessageBox,
@@ -23,7 +23,7 @@ from .emu_cards import LAUNCHBOX_COLOUR, Callout, chip_css, clear_layout, break_
 from .motion import smooth_scroll
 from .theme import AlignC, AlignL, AlignV, T
 from .recomp_dialog import AddRecompDialog, CoverSearchDialog, read_picture
-from .widgets import accent_button, AnimRadio, BackdropView, Card, detail_shell, ModalStack, hint
+from .widgets import accent_button, AnimRadio, BackdropView, Card, detail_shell, ModalStack, hint, symbolize
 
 POSTER_W, POSTER_H = 176, 250  # the cover, 7:10
 CELL_W, CELL_H = 196, 346
@@ -362,6 +362,7 @@ class RecompMixin:
         self._rc_game: dict[str, str] = {}  # id -> the LaunchBox Overview of the game ('' = none found)
         self._rc_about: dict[str, str] = {}  # id -> the one-line description the developers gave the repository
         self._rc_check_stop = threading.Event()
+        self._rc_scanning = False  # looking through the Recomps folder right now
 
     @property
     def rc_store(self) -> rc.Store:
@@ -389,6 +390,29 @@ class RecompMixin:
         lay = QVBoxLayout(view)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
+        folder_card = Card()
+        folder = QHBoxLayout()
+        folder.setSpacing(8)
+        label = QLabel("Recomps folder")
+        label.setObjectName("muted")
+        self.rc_root_edit = QLineEdit()
+        self.rc_root_edit.setReadOnly(True)
+        self.rc_root_edit.setPlaceholderText("Not set. New installs go into Distill's own folder; pick one to keep them all together.")
+        self.rc_root_edit.setToolTip("Where recomps are installed, and the place Distill looks for ones you already have. "
+                                     "Updates keep your saves and settings: only files the download replaces are touched.")
+        self.rc_root_btn = QPushButton("Choose...")
+        self.rc_root_btn.clicked.connect(self._rc_choose_root)
+        symbolize(self.rc_root_btn, "folder-open", "Choose the Recomps folder")
+        self.rc_scan_btn = QPushButton("Find installed")
+        self.rc_scan_btn.setToolTip("Look in the Recomps folder for recomps you already have, and link them. Nothing is changed.")
+        self.rc_scan_btn.clicked.connect(self._rc_scan_clicked)
+        symbolize(self.rc_scan_btn, "search", "Find installed: " + self.rc_scan_btn.toolTip())
+        folder.addWidget(label)
+        folder.addWidget(self.rc_root_edit, 1)
+        folder.addWidget(self.rc_root_btn)
+        folder.addWidget(self.rc_scan_btn)
+        folder_card.add(folder)
+        lay.addWidget(folder_card)
         bar = QHBoxLayout()  # two rows: filters on top, actions below, so the page never needs more width than the window has
         bar.setSpacing(8)
         actions = QHBoxLayout()
@@ -415,6 +439,7 @@ class RecompMixin:
         self.rc_check_btn.clicked.connect(self._rc_check_library)
         self.rc_updates_btn = QPushButton("Check for updates")
         self.rc_updates_btn.clicked.connect(self._rc_check_updates)
+        symbolize(self.rc_updates_btn, "refresh", "Check for updates")
         bar.addWidget(self.rc_search, 1)
         bar.addWidget(self.rc_system)
         bar.addWidget(self.rc_kind)
@@ -425,6 +450,7 @@ class RecompMixin:
         self.rc_add_btn = QPushButton("Add recomp...")
         self.rc_add_btn.setToolTip("Add a project that isn't listed yet: its GitHub address, the game it plays and what kind of project it is.")
         self.rc_add_btn.clicked.connect(lambda: self._rc_add_dialog())
+        symbolize(self.rc_add_btn, "plus", "Add a recomp: " + self.rc_add_btn.toolTip())
         actions.addWidget(self.rc_add_btn)
         actions.addWidget(self.rc_updates_btn)
         lay.addLayout(bar)
@@ -450,10 +476,8 @@ class RecompMixin:
         return view
 
     def _rc_hero_css(self) -> str:
-        """The top card: the colour wash the Emulator page uses; a little see-through while the game's banner shows behind it."""
-        card = tint(T.card, 222 if self._rc_banner_on() else 255)
-        return (f"QFrame#card {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {tint(T.grad[1], 34)}, stop:0.6 {card}, stop:1 {card}); "
-                f"border: 1px solid {T.card_border.name()}; border-radius: 14px; }}")
+        """The top card, with no card: no fill and no outline, so the page's art behind it is the card."""
+        return "QFrame#card { background: transparent; border: none; }"
 
     def _rc_banner_on(self) -> bool:
         return getattr(self, "rcd_view", None) is not None and self.rcd_view._src is not None
@@ -525,6 +549,12 @@ class RecompMixin:
         self.rcd_play.clicked.connect(self._rc_play)
         self.rcd_more = QPushButton("Open folder")
         self.rcd_more.clicked.connect(self._rc_open_folder)
+        self.rcd_locate = QPushButton("I already have it...")
+        self.rcd_locate.setToolTip("Point Distill at a copy you already installed, so it can start and update it.")
+        locate_menu = QMenu(self.rcd_locate)
+        locate_menu.addAction("Choose its folder...", self._rc_locate_folder)
+        locate_menu.addAction("Choose its program file...", self._rc_locate_file)
+        self.rcd_locate.setMenu(locate_menu)
         self.rcd_remove = QPushButton("Uninstall")
         self.rcd_remove.clicked.connect(self._rc_uninstall)
         T.bind_css(self.rcd_remove, lambda: f"QPushButton:hover {{ background: {T.btn_danger[0].name()}; border-color: {T.btn_danger[1].name()}; "
@@ -537,9 +567,12 @@ class RecompMixin:
         self.rcd_unlist = QPushButton("Remove from my list")
         self.rcd_unlist.setToolTip("Take this project off your own list. An installed copy has to be uninstalled first.")
         self.rcd_unlist.clicked.connect(self._rc_unlist)
-        for b in (self.rcd_play, self.rcd_more, self.rcd_show_rom, self.rcd_remove, self.rcd_edit, self.rcd_unlist):
+        for b in (self.rcd_play, self.rcd_more, self.rcd_locate, self.rcd_show_rom, self.rcd_remove, self.rcd_edit, self.rcd_unlist):
             b.setMinimumHeight(40)
-        for b in (self.rcd_main, self.rcd_play, self.rcd_more, self.rcd_show_rom, self.rcd_edit):
+        symbolize(self.rcd_play, "play", "Play")
+        symbolize(self.rcd_more, "folder-open", "Open folder")
+        symbolize(self.rcd_edit, "edit", "Edit: " + self.rcd_edit.toolTip())
+        for b in (self.rcd_main, self.rcd_play, self.rcd_more, self.rcd_locate, self.rcd_show_rom, self.rcd_edit):
             row.addWidget(b)
         row.addStretch(1)
         row.addWidget(self.rcd_unlist)
@@ -648,6 +681,9 @@ class RecompMixin:
             self._rc_apply_catalog(rc.load_catalog(), first=True)
             self._rc_reload_catalog()  # extra sources and GitHub search, off the UI thread
             self._rc_check_updates(quiet=True)
+            if folder := rc.recomps_root(self.rc_store):
+                self.rc_root_edit.setText(str(folder))
+                self._rc_scan(quiet=True)  # picks up anything put there since last time
         self._rc_refresh_status()
 
     def _rc_apply_catalog(self, catalog: list, first: bool = False) -> None:
@@ -780,7 +816,7 @@ class RecompMixin:
     def _rc_state(self, r: rc.Recomp) -> dict:
         inst = self.rc_store.installed(r.id)
         latest = self._rc_latest.get(r.id)
-        update = bool(inst and isinstance(latest, tuple) and rc.is_newer(inst.version, latest[0].tag))
+        update = bool(isinstance(latest, tuple) and rc.update_available(inst, latest[0].tag))
         own = self._rc_owned.get(r.id)
         return {"installed": inst is not None, "update": update, "owned": own.status if own else ""}
 
@@ -824,7 +860,7 @@ class RecompMixin:
             msg = (f"{shown} of your own project{'s' if shown != 1 else ''}." if shown else
                    "You haven't added any recomps yet. Press Add recomp... to add one from its GitHub address.")
         elif self.rc_installed.isChecked():
-            msg = (f"{shown} of {total} projects installed." if shown else "Nothing is installed yet. Open a project and press Install.")
+            msg = (f"{shown} of {total} projects installed." if shown else "Nothing is installed yet. Open a project and press Install, or choose your Recomps folder and press Find installed.")
         else:
             msg = f"{shown} of {total} projects."
             if not self._rc_owned:
@@ -1107,9 +1143,17 @@ class RecompMixin:
         for note in notes:
             self.rcd_rom_box.addWidget(Callout(*note))
         motion.set_visible(self.rcd_show_rom, bool(own and own.path), axis="width", animate=animate)
-        update = bool(inst and isinstance(latest, tuple) and rc.is_newer(inst.version, latest[0].tag))
+        update = bool(isinstance(latest, tuple) and rc.update_available(inst, latest[0].tag))
+        gone = bool(inst and not inst.exe_path().exists())  # a linked copy that was moved or deleted
+        shared = bool(inst and inst.linked == "file")  # the person's own, in a folder with other programs: started, never updated
+        if gone:
+            self.rcd_rom_box.addWidget(Callout("bad", f"Its files are missing from {inst.folder}. Reinstall it, or point Distill at the copy you have."))
+        elif shared:
+            self.rcd_rom_box.addWidget(Callout("info", "This is your own copy and it shares a folder with other programs, so Distill will start it but won't update it."))
         if busy:
             status, colour = "Working...", T.accent_text
+        elif gone:
+            status, colour = "Files missing", T.bad
         elif update:
             status, colour = "Update available", T.warn
         elif inst:
@@ -1120,7 +1164,8 @@ class RecompMixin:
         T.bind_css(self.rcd_status, lambda: pill_css(colour))
         rows: list[tuple[str, str, object]] = []
         if inst:
-            rows.append(("Installed", inst.version, None))
+            rows.append(("Installed", inst.version or "Version unknown", None))
+            rows.append(("Install", "Your own copy, linked" if inst.linked else "Installed by Distill", None))
         if isinstance(latest, tuple):
             rel, asset = latest
             rows.append(("Latest release", rel.tag, T.warn if update else None))
@@ -1142,10 +1187,14 @@ class RecompMixin:
         if r.source:
             rows.append(("Listed by", r.source, None))
         self.rcd_facts.set_facts(rows)
-        self.rcd_main.setText("Cancel" if busy else "Update" if update else "Install" if not inst else "Reinstall")
-        self.rcd_main.setEnabled(busy or isinstance(latest, tuple))
+        unknown = bool(inst and inst.linked and not inst.version)  # linked, version not known: the latest release is offered as an update
+        self.rcd_main.setText("Cancel" if busy else "Update" if update or unknown else "Install" if not inst else "Reinstall")
+        self.rcd_main.setEnabled(busy or (isinstance(latest, tuple) and not shared))
         motion.set_visible(self.rcd_play, inst is not None, axis="width", animate=animate)
-        self.rcd_play.setEnabled(inst is not None and not busy)
+        self.rcd_play.setEnabled(inst is not None and not busy and not gone)
+        self.rcd_locate.setEnabled(not busy)
+        self.rcd_remove.setText("Remove" if inst and inst.linked else "Uninstall")
+        self.rcd_remove.setToolTip("Forget this copy. Your files are left where they are." if inst and inst.linked else "Delete this install.")
         motion.set_visible(self.rcd_more, inst is not None, axis="width", animate=animate)
         motion.set_visible(self.rcd_remove, inst is not None, axis="width", animate=animate)
         self.rcd_remove.setEnabled(not busy)
@@ -1282,12 +1331,102 @@ class RecompMixin:
         r = self._rc_by_id.get(self._rc_current)
         if r is None or r.id in self._rc_busy:
             return
-        if msgbox.question(self, "Uninstall", f"Remove {r.name} from this PC?\n\nIts folder is deleted, including any saves or settings "
-                                                   "the game keeps there. Your own game files are not touched.") != QMessageBox.StandardButton.Yes:
+        inst = self.rc_store.installed(r.id)
+        if inst is not None and inst.linked:
+            ask = msgbox.question(self, "Remove from Distill", f"Stop managing {r.name}?\n\nYour files stay exactly where they are; Distill just "
+                                                               "forgets where it is. You can link it again at any time.")
+        else:
+            ask = msgbox.question(self, "Uninstall", f"Remove {r.name} from this PC?\n\nIts folder is deleted, including any saves or settings "
+                                                     "the game keeps there. Your own game files are not touched.")
+        if ask != QMessageBox.StandardButton.Yes:
             return
-        rc.uninstall(self.rc_store, r)
-        self.rcd_msg.setText("Uninstalled.")
+        self.rcd_msg.setText(rc.uninstall(self.rc_store, r))
         self._rc_refresh_detail()
+        self._rc_refresh_item(r.id)
+
+    # ---- the Recomps folder, and recomps you already have ---------------------------------------------------
+    def _rc_start_dir(self) -> str:
+        return self.rc_root_edit.text() or QStandardPaths.writableLocation(QStandardPaths.StandardLocation.HomeLocation)
+
+    def _rc_choose_root(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Choose your Recomps folder", self._rc_start_dir())
+        if not path:
+            return
+        rc.set_recomps_root(self.rc_store, path)
+        self.rc_root_edit.setText(path)
+        self._rc_scan(quiet=False)
+
+    def _rc_scan_clicked(self) -> None:
+        if rc.recomps_root(self.rc_store) is None:
+            self._rc_choose_root()  # nothing to look in yet: ask where, then look
+        else:
+            self._rc_scan(quiet=False)
+
+    def _rc_scan(self, quiet: bool = False) -> None:
+        """Look in the Recomps folder for recomps already there, in a worker thread."""
+        if self._rc_scanning or rc.recomps_root(self.rc_store) is None:
+            return
+        self._rc_scanning = True
+        self.rc_scan_btn.setEnabled(False)
+        if not quiet:
+            self.rc_status.setText("Looking for recomps you already have...")
+        catalog, store = list(self._rc_catalog), self.rc_store
+
+        def work() -> None:
+            try:
+                found = rc.scan_all(store, catalog)
+            except Exception as exc:
+                self.ui_q.put(("recomp_scan", None, quiet, f"Search failed: {exc}"))
+                return
+            self.ui_q.put(("recomp_scan", found, quiet, ""))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _rc_on_scan(self, found, quiet: bool, error: str) -> None:
+        self._rc_scanning = False
+        self.rc_scan_btn.setEnabled(True)
+        if found is None:
+            self.rc_status.setText(error)
+            return
+        new = rc.apply_scan(self.rc_store, found)
+        self._rc_fill()
+        if new:
+            names = ", ".join(self._rc_by_id[i].name for i in new if i in self._rc_by_id)
+            self.rc_status.setText(f"Found {len(new)} recomp{'s' if len(new) != 1 else ''} you already have: {names}.")
+        elif not quiet:
+            self.rc_status.setText("No new recomps found. Put them in your Recomps folder, or open one and press \"I already have it\".")
+        self._rc_check_updates(quiet=True)
+        if self._rc_current:
+            self._rc_refresh_detail()
+
+    def _rc_locate_folder(self) -> None:
+        r = self._rc_by_id.get(self._rc_current)
+        if r is None:
+            return
+        path = QFileDialog.getExistingDirectory(self, f"Choose the folder {r.name} is in", self._rc_start_dir())
+        if path:
+            self._rc_link(r, Path(path))
+
+    def _rc_locate_file(self) -> None:
+        r = self._rc_by_id.get(self._rc_current)
+        if r is None:
+            return
+        path, _f = QFileDialog.getOpenFileName(self, f"Choose {r.name}'s program file", self._rc_start_dir())
+        if path:
+            self._rc_link(r, Path(path))
+
+    def _rc_link(self, r: rc.Recomp, path: Path) -> None:
+        try:
+            found = rc.link(self.rc_store, r, path)
+        except rc.RecompError as exc:
+            self.rcd_msg.setText(str(exc))
+            return
+        shared = " It shares a folder with other programs, so Distill will start it but won't update it." if found.linked == "file" else ""
+        names = [self._rc_by_id[i].name if i in self._rc_by_id else i for i in found.released]
+        let_go = f" {' and '.join(names)} was pointing at it and no longer is." if names else ""
+        self.rcd_msg.setText(f"Linked {r.name}" + (f" {found.version}" if found.version else "") + f".{shared}{let_go}")
+        self._rc_refresh_detail()
+        for rid in (r.id, *found.released):
+            self._rc_refresh_item(rid)
 
     # ---- library check --------------------------------------------------------------------------------------
     def _rc_library_entries(self) -> list:
@@ -1324,6 +1463,9 @@ class RecompMixin:
                 self.rc_status.setText(ev[2])
             else:
                 self._rc_apply_catalog(ev[1])
+            return
+        if name == "recomp_scan":
+            self._rc_on_scan(ev[1], ev[2], ev[3])
             return
         if name == "recomp_about":
             self._rc_about[ev[1]] = ev[2]

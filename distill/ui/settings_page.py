@@ -393,7 +393,7 @@ class SettingsMixin:
         lay.addWidget(card)
         self._pin_boxes: dict[str, AnimCheckBox] = {}
         card = Card("Pinned tools")
-        card.add(hint("Tick the tools you want in the sidebar."))
+        card.add(hint("Select the tools you want in the sidebar."))
         all_row = QHBoxLayout()
         all_row.setSpacing(8)
         pin_all, unpin_all = QPushButton("Pin all"), QPushButton("Unpin all")

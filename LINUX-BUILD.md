@@ -15,8 +15,8 @@ Linux uses `distill.paths`, whether the application folder is writable or mounte
 | Files | Directory | Default |
 | --- | --- | --- |
 | Settings, catalog overrides and `distill_keys.json` | `$XDG_CONFIG_HOME/distill` | `~/.config/distill` |
-| Downloaded tools, managed installs, `recomps/games.db` and `Watch` inbox | `$XDG_DATA_HOME/distill` | `~/.local/share/distill` |
-| Logs, undo records and runtime state | `$XDG_STATE_HOME/distill` | `~/.local/state/distill` |
+| Downloaded tools, managed installs, `recomps/games.db`, the Distill Resonance library (`distill_media.db`, its covers and audio cache), `save_backups` and `Watch` inbox | `$XDG_DATA_HOME/distill` | `~/.local/share/distill` |
+| Logs, undo records, search history and runtime state | `$XDG_STATE_HOME/distill` | `~/.local/state/distill` |
 | Downloadable caches, including `game_media` artwork and achievements | `$XDG_CACHE_HOME/distill` | `~/.cache/distill` |
 
 Only absolute XDG overrides are accepted. `DISTILL_PORTABLE=1` keeps the existing app-folder layout instead.

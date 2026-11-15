@@ -317,7 +317,7 @@ class OrgPageTests(unittest.TestCase):
         _f, _m, step = orgpages.scan_page(page, Path("."), True, {"_steps": {"b"}}, threading.Event())
         self.assertEqual((step, ca), ("b", []))
         findings, message, _s = orgpages.scan_page(page, Path("."), True, {"_steps": set()}, threading.Event())
-        self.assertEqual((findings, message), ([], "Tick at least one step to scan."))
+        self.assertEqual((findings, message), ([], "Select at least one step to scan."))
 
     def test_nothing_to_do_anywhere_names_what_was_checked(self):
         (a, _), (b, _) = self.fake_tool("a", []), self.fake_tool("b", [])

@@ -56,7 +56,7 @@ GAMES = (
 )
 UPDATES = (
     Service("github", "GitHub",
-            "A read-only token (no permissions ticked) lifts GitHub's limit from 60 to 5,000 requests an hour, which tool, emulator "
+            "A read-only token (no permissions selected) lifts GitHub's limit from 60 to 5,000 requests an hour, which tool, emulator "
             "and recomp update checks can use up.",
             "https://github.com/settings/personal-access-tokens/new",
             (("github", "Token", "GitHub token (optional)", True),), "Enter a key first."),

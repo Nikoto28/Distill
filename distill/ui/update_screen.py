@@ -46,8 +46,8 @@ class FillLogo(QWidget):
         self._anim.setDuration(240)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.valueChanged.connect(self._on_anim)
-        self._ripple_timer = QTimer(self)
-        self._ripple_timer.setInterval(33)
+        self._clock = motion.FrameClock()
+        self._ripple_timer = motion.frame_timer(self)
         self._ripple_timer.timeout.connect(self._ripple)
         T.bind(self, self._load)  # the dark and light looks have their own colourway
 
@@ -81,13 +81,15 @@ class FillLogo(QWidget):
         self.update()
 
     def _ripple(self) -> None:
+        dt = self._clock.dt()
         if motion.on() and 0.0 < self._shown < 1.0:
-            self._phase = (self._phase + 0.12) % (2 * math.pi)
+            self._phase = (self._phase + 3.6 * dt) % (2 * math.pi)  # 3.6 radians a second: what 0.12 a frame was at 30 fps
             self.update()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self._ripple_timer.start()
+        self._clock.reset()
+        self._ripple_timer.start(motion.frame_ms(self))
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)

@@ -5,6 +5,9 @@ import sys
 
 
 def run() -> int:
+    if "--launch" in sys.argv[1:]:  # `Distill --launch game:<id>`: what a Sunshine entry runs. No window, no Qt, no first-start installs
+        from .launcher import main as launch_main
+        return launch_main(sys.argv[1:])
     from .bootstrap import ensure_dependencies, fatal, missing_qt_message
 
     ensure_dependencies()  # the first start of a source checkout installs PySide6 and py7zr

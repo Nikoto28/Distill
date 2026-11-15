@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea, QDialog, 
                                QPlainTextEdit, QProgressBar, QScrollArea, QWidget)
 
 from .. import paths
+from . import framemath
 
 FULL = 16777215  # QWIDGETSIZE_MAX: "no height limit"
 
@@ -752,3 +753,34 @@ def install_dialog_fade(app) -> None:
 def install_smooth_scroll(app) -> None:
     app._scroll_everywhere = _ScrollEverywhere(app)
     app.installEventFilter(app._scroll_everywhere)
+
+
+# ---- frame-by-frame animations ------------------------------------------------------------------------------------------
+def frame_ms(widget: QWidget) -> int:
+    """The time between frames for an animation drawn by a timer: one frame at the refresh rate of the screen the widget is on."""
+    screen = widget.screen()
+    return framemath.refresh_interval_ms(screen.refreshRate() if screen is not None else 0.0)
+
+
+def frame_timer(parent: QObject) -> QTimer:
+    """A timer for drawing frames. Qt's default timer snaps to the system clock (about 15 ms on Windows), so frames arrive unevenly
+    and the motion looks choppy; a precise one keeps time. Start it with `start(frame_ms(widget))`."""
+    timer = QTimer(parent)
+    timer.setTimerType(Qt.TimerType.PreciseTimer)
+    return timer
+
+
+class FrameClock:
+    """Seconds since the last frame (see framemath.step_seconds). `reset()` when the animation starts, so a long rest is not counted."""
+
+    def __init__(self) -> None:
+        self._last: float | None = None
+
+    def reset(self) -> None:
+        self._last = None
+
+    def dt(self) -> float:
+        now = time.monotonic()
+        step, self._last = framemath.step_seconds(now, self._last), now
+        return step
+

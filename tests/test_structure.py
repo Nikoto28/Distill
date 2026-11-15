@@ -10,7 +10,7 @@ from tests import helpers  # noqa: F401  (puts the project on sys.path)
 
 PKG = Path(__file__).resolve().parent.parent / "distill"
 CORE = ["constants", "bootstrap", "system", "formats", "models", "batch", "organize", "downloads", "links",
-        "torrents", "torrentsearch", "torbox", "torrent_runners", "tools", "soundtracks", "switchconv"]
+        "torrents", "torrentsearch", "torbox", "torrent_runners", "tools", "soundtracks", "mediastore", "mediaqueue", "switchconv"]
 
 
 def module_name(path: Path) -> str:

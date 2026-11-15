@@ -119,7 +119,7 @@ class PatchViewMixin:
         st = self.org[key]
         games = {i for i, _j in st.patch_ticks}
         made = sum(len(self._patch_plan(key, i)) for i in games)
-        text = f"{len(st.patch_ticks)} patch(es) ticked on {len(games)} game(s)  |  {made} patched file(s) will be made"
+        text = f"{len(st.patch_ticks)} patch(es) selected on {len(games)} game(s)  |  {made} patched file(s) will be made"
         if st.message:
             text += f"  |  {st.message}"
         st.status.setText(text + ".")
@@ -186,10 +186,10 @@ class PatchViewMixin:
                     self._patch_rename_actions(key, menu, f.subject, *plan[0])
                 menu.addAction("Add patch...", lambda: self._patch_add_to_game(key, i))
                 if any(not c.problem for c in f.data):
-                    menu.addAction("Tick all patches", lambda: self._patch_tick_game(key, i, True))
-                    menu.addAction("Untick all patches", lambda: self._patch_tick_game(key, i, False))
+                    menu.addAction("Select all patches", lambda: self._patch_tick_game(key, i, True))
+                    menu.addAction("Deselect all patches", lambda: self._patch_tick_game(key, i, False))
                     menu.addSeparator()
-                    menu.addAction("Apply this game's ticked patches now",
+                    menu.addAction("Apply this game's selected patches now",
                                    lambda: self._patch_apply_now(key, {t for t in st.patch_ticks if t[0] == i}))
         elif f.data:
             j = item.data(0, Qt.ItemDataRole.UserRole)

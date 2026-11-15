@@ -31,6 +31,7 @@ class MediaCase(unittest.TestCase):
         patch = mock.patch.object(mm, "MEDIA_DIR", Path(tmp.name))
         patch.start()
         self.addCleanup(patch.stop)
+        mm._PAGES.clear()  # (pages are kept for a few minutes: one test's must not be another's)
 
 
 class LaunchBoxImageTests(MediaCase):
@@ -169,8 +170,9 @@ class LaunchBoxImageTests(MediaCase):
             shots = mm.fetch_screenshots("g4", "Game", "x", on_update=lambda paths: updates.append([p.is_file() for p in paths]))
         self.assertEqual(len(shots), 2)
         self.assertTrue(all(p.is_file() and mm.thumb_path(p).is_file() for p in shots))
-        downloads = [u for u in order if "/images/" not in u and "results" not in u]
-        self.assertEqual([u.rsplit("/", 1)[1][:2] for u in downloads], ["b0", "b1", "a0", "a1"])  # previews first
+        downloads = [u for u in order if "/games/" not in u]
+        names = [u.rsplit("/", 1)[1][:2] for u in downloads]
+        self.assertEqual((names[:2], sorted(names[2:])), (["b0", "b1"], ["a0", "a1"]))  # the previews first, then the big ones (which come a few at a time)
         self.assertEqual(updates[0], [False, False])  # the page could already show the previews, the big pictures still to come
         self.assertEqual(mm.shot_image(shots[0]), shots[0])
         shots[0].unlink()
@@ -207,6 +209,70 @@ class LaunchBoxImageTests(MediaCase):
     def test_something_that_is_not_a_picture_is_not_kept(self):
         with mock.patch.object(rc, "_get", lambda *a, **k: b"<html>error</html>"):
             self.assertFalse(mm._download("https://x/y.jpg", Path(mm.MEDIA_DIR) / "z.jpg"))
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 40
+LB_MEDIA = f"""
+<h3>Cart - Back</h3>
+<img src="https://images.launchbox-app.com/{UUID.replace('0123', '6666')}.png" alt="Super Mario World - Cart - Back">
+<h3>Cart - Front</h3>
+<img src="https://images.launchbox-app.com/{UUID.replace('0123', '5555')}.png" alt="Super Mario World - Cart - Front">
+<h3>Disc</h3>
+<img src="https://images.launchbox-app.com/{UUID.replace('0123', '7777')}.png" alt="Gran Turismo - Disc">
+<h3>Box - Front</h3>
+<img src="https://images.launchbox-app.com/{UUID.replace('0123', '4444')}.jpg" alt="Super Mario World - Box - Front">
+"""
+
+
+class DiscAndCartTests(MediaCase):
+    def test_the_page_s_disc_and_cartridge_are_found_fronts_first(self):
+        got = mm.parse_launchbox_images(LB_MEDIA)
+        self.assertEqual([u.split("/")[-1][:4] for u in got["cart"]], ["5555", "6666"])  # the front, then the back
+        self.assertEqual([u.split("/")[-1][:4] for u in got["disc"]], ["7777"])
+        self.assertNotIn("4444", "".join(got["cart"] + got["disc"] + got["screenshots"] + got["fanart"]))  # box art is not one of them
+
+    def test_a_page_without_them_has_only_the_two_usual_keys(self):
+        self.assertEqual(mm.parse_launchbox_images(LB_IMAGES).keys(), {"screenshots", "fanart"})
+
+    def test_which_systems_get_which(self):
+        self.assertEqual([mm.media_kind(s) for s in ("PlayStation", "GameCube", "Sega Saturn", "Dreamcast")], ["disc"] * 4)
+        self.assertEqual([mm.media_kind(s) for s in ("NES", "SNES", "Nintendo 64", "Game Boy", "Mega Drive", "Switch")], ["cart"] * 6)
+        self.assertEqual([mm.media_kind(s) for s in ("PSP", "Famicom Disk System", "PC", "", "Unknown")], [""] * 5)
+
+    def _fake_get(self, calls):
+        def fake_get(url, token="", accept="", timeout=20):
+            calls.append(url)
+            if "results" in url:
+                return b"<a href='/games/details/777-super-mario-world'>Super Mario World</a> Super Nintendo Entertainment System"
+            if "/images/" in url:
+                return LB_MEDIA.encode()
+            return PNG
+        return fake_get
+
+    def test_the_cartridge_is_fetched_kept_and_not_asked_for_again(self):
+        calls: list[str] = []
+        with mock.patch.object(rc, "_get", self._fake_get(calls)), mock.patch.object(rc, "_lb_game_ids", lambda page, title, system: ["777"]):
+            path = mm.fetch_media_art("g1", "cart", "Super Mario World", "Super Nintendo Entertainment System")
+            self.assertEqual(path, mm.cached_media_art("g1", "cart"))
+            self.assertTrue(any(u.endswith("5555" + UUID[4:] + ".png") or "/5555" in u for u in calls))  # the front was the one downloaded
+            n = len(calls)
+            self.assertEqual(mm.fetch_media_art("g1", "cart", "Super Mario World", "x"), path)
+            self.assertEqual(len(calls), n)
+            self.assertIsNone(mm.cached_media_art("g1", "disc"))
+
+    def test_no_picture_online_is_remembered_and_other_kinds_are_refused(self):
+        with mock.patch.object(rc, "_get", lambda *a, **k: b"<p>nothing</p>"), mock.patch.object(rc, "_lb_game_ids", lambda page, title, system: ["777"]):
+            self.assertIsNone(mm.fetch_media_art("g2", "disc", "Gran Turismo", "Sony Playstation"))
+            self.assertTrue((Path(mm.MEDIA_DIR) / "disc_g2.miss").is_file())
+            self.assertIsNone(mm.fetch_media_art("g2", "box", "Gran Turismo", "Sony Playstation"))
+
+    def test_editing_a_game_clears_its_disc_and_cartridge_too(self):
+        d = Path(mm.MEDIA_DIR)
+        d.mkdir(parents=True, exist_ok=True)
+        for name in ("disc_g1.png", "cart_g1.png", "cart_g1.miss", "cart_g2.png"):
+            (d / name).write_bytes(b"x")
+        mm.clear_media("g1")
+        self.assertEqual(sorted(x.name for x in d.iterdir()), ["cart_g2.png"])
 
 
 class RetroAchievementsTests(MediaCase):
@@ -369,6 +435,141 @@ class RaHashTests(unittest.TestCase):
             self.assertIn("h=1", calls[0])  # the list is asked for with its hashes
             self.assertEqual(mm.ra_progress("Game Boy Advance", "Other Thing", "me", "key", str(self.write("o.gba", b"unlisted"))).id, 8)
             self.assertEqual(mm.ra_progress("Game Boy Advance", "Other Thing", "me", "key").id, 8)  # no file given: by name alone, as before
+
+
+def _u(n: str, ext: str = "png", host: str = "https://images.launchbox-app.com//") -> str:
+    return f"{host}{n * 8}-1111-4222-8333-{n * 12}.{ext}"
+
+
+def _entry_page(name: str, platform: str, plat_id: int = 29, media: str = "") -> str:
+    """A LaunchBox game page the way the site writes it now: a heading, a platform link, then the Media section."""
+    return (f'<h1>{name}</h1><div>Platform</div><a href="https://gamesdb.launchbox-app.com/platforms/games/{plat_id}-{platform.replace(" ", "-")}">{platform}</a>'
+            f'<h2>Media</h2>{media}')
+
+
+class CurrentLaunchBoxPageTests(MediaCase):
+    """LaunchBox's pages as they are now: pictures on two hosts, written with a double slash, fan-made ones among the official."""
+    MEDIA = (
+        f'<h3>Box - Front</h3><img alt="Mother 3 - Box - Front (Japan) - 3185x2030" src="{_u("1", "jpg")}">'
+        f'<h3>Cart - Front</h3><img alt="Mother 3 - Cart - Front (Japan) - 640x375" src="{_u("2")}">'
+        f'<h3>Clear Logo</h3><img alt="Mother 3 - Clear Logo (Japan) - 2995x710" src="{_u("3")}">'
+        f'<h3>Fanart - Background</h3><img alt="Mother 3 - Fanart - Background (Japan) - 3579x2013" src="{_u("4", "png", "https://gamesdb-images.launchbox.gg/r2_")}">'
+        f'<h3>Fanart - Box - Front</h3><img alt="Mother 3 - Fanart - Box - Front (North America) - 1370x1370" src="{_u("5", "jpg")}">'
+        f'<h3>Fanart - Cart - Front</h3><img alt="Mother 3 - Fanart - Cart - Front (North America) - 473x283" src="{_u("6")}">'
+        f'<h3>Screenshot - Gameplay</h3><img alt="Mother 3 - Screenshot - Gameplay (Japan) - 3840x2560" src="{_u("7", "png", "https://gamesdb-images.launchbox.gg/r2_")}">'
+    )
+
+    def test_both_hosts_and_the_double_slash_are_read(self):
+        got = mm.parse_launchbox_images(self.MEDIA)
+        self.assertEqual(len(got["cart"]), 2)
+        self.assertEqual(len(got["fanart"]), 1)
+        self.assertEqual(len(got["screenshots"]), 1)
+        self.assertIn("gamesdb-images.launchbox.gg/r2_", got["fanart"][0] + got["screenshots"][0])
+
+    def test_the_official_cartridge_comes_before_a_fan_made_one(self):
+        got = mm.parse_launchbox_images(self.MEDIA)
+        self.assertEqual([u.split("/")[-1][:1] for u in got["cart"]], ["2", "6"])
+
+    def test_fan_made_box_art_is_not_a_background_and_a_logo_is_nothing(self):
+        got = mm.parse_launchbox_images(self.MEDIA)
+        flat = "".join(got["fanart"] + got["cart"] + got["screenshots"])
+        for n in "135":
+            self.assertNotIn("/" + n * 8, flat)
+
+    def test_box_art_for_the_cover_search_is_found_on_both_hosts_too(self):
+        page = (f'<h3>Box - Front</h3><img alt="Mother 3 - Box - Front (Japan) - 3185x2030" src="{_u("1", "jpg")}">'
+                f'<h3>Box - Front</h3><img alt="Mother 3 - Box - Front (World) - 999x1000" src="{_u("8", "png", "https://gamesdb-images.launchbox.gg/r2_")}">')
+        self.assertEqual(len(rc._lb_posters(page)), 2)
+
+    def test_a_front_beats_a_3d_render_beats_a_back(self):
+        page = (f'<h3>Cart - Back</h3><img alt="G - Cart - Back (Japan)" src="{_u("a")}">'
+                f'<h3>Cart - 3D</h3><img alt="G - Cart - 3D (Japan)" src="{_u("b")}">'
+                f'<h3>Cart - Front</h3><img alt="G - Cart - Front (Japan)" src="{_u("c")}">')
+        self.assertEqual([u.split("/")[-1][:1] for u in mm.parse_launchbox_images(page)["cart"]], ["c", "b", "a"])
+
+
+class FindingTheRightEntryTests(MediaCase):
+    """Mother 3 is on LaunchBox as 'Mother 3' (Game Boy Advance) and as 'Mother 3: Claus's Journey', which has box art and nothing else. A
+    search result whose link names no game ('/games/details/9029') used to rank below the one that does."""
+    SEARCH = ("<a href='/games/details/169285-mother-3-clauss-journey'>Mother 3: Claus's Journey</a> Nintendo Game Boy Advance "
+              "<a href='/games/details/9029'>Mother 3</a> Nintendo Game Boy Advance")
+
+    def _get(self, calls, pages):
+        def fake_get(url, token="", accept="", timeout=20):
+            calls.append(url)
+            if "/results/" in url:
+                return self.SEARCH.encode()
+            gid = url.rstrip("/").rsplit("/", 1)[-1]
+            if gid in pages:
+                return pages[gid].encode()
+            return PNG
+        return fake_get
+
+    PAGES = {"169285": _entry_page("Mother 3: Claus's Journey", "Nintendo Game Boy Advance", media='<h3>Box - Front</h3><img alt="x - Box - Front" src="' + _u("9", "jpg") + '">'),
+             "9029": _entry_page("Mother 3", "Nintendo Game Boy Advance", media=CurrentLaunchBoxPageTests.MEDIA)}
+
+    def test_the_entry_named_exactly_wins_whatever_the_link_says(self):
+        with mock.patch.object(rc, "_get", self._get([], self.PAGES)):
+            self.assertEqual(mm.lb_game_id("Mother 3", "Nintendo Game Boy Advance"), "9029")
+
+    def test_the_cartridge_is_found_for_it(self):
+        calls: list[str] = []
+        with mock.patch.object(rc, "_get", self._get(calls, self.PAGES)):
+            path = mm.fetch_media_art("m3", "cart", "Mother 3", "Nintendo Game Boy Advance")
+        self.assertIsNotNone(path)
+        self.assertTrue(any("/222222222222.png" in u or "22222222-1111" in u for u in calls))  # the official cartridge, not a fan-made one
+
+    def test_the_right_platform_beats_a_better_name(self):
+        pages = {"1": _entry_page("Tetris", "Nintendo Entertainment System", 40), "2": _entry_page("Tetris", "Nintendo Game Boy", 28),
+                 "3": _entry_page("Tetris Attack", "Nintendo Game Boy", 28)}
+        search = "<a href='/games/details/1-tetris'>t</a><a href='/games/details/2-tetris'>t</a><a href='/games/details/3-tetris-attack'>t</a>"
+
+        def fake_get(url, token="", accept="", timeout=20):
+            return search.encode() if "/results/" in url else pages.get(url.rsplit("/", 1)[-1], "").encode()
+
+        with mock.patch.object(rc, "_get", fake_get):
+            self.assertEqual(mm.lb_game_id("Tetris", "Nintendo Game Boy"), "2")
+
+    def test_a_game_known_by_only_its_base_title_is_found_without_the_subtitle(self):
+        pages = {"7": _entry_page("Gothic 2", "Microsoft Windows", 5)}
+        seen: list[str] = []
+
+        def fake_get(url, token="", accept="", timeout=20):
+            seen.append(url)
+            if "/results/" in url:
+                return b"<a href='/games/details/7-gothic-2'>Gothic 2</a>" if "Night" not in url else b"nothing here"
+            return pages.get(url.rsplit("/", 1)[-1], "").encode()
+
+        with mock.patch.object(rc, "_get", fake_get):
+            self.assertEqual(mm.lb_game_id("Gothic 2: Night of the Raven", "Microsoft Windows"), "7")
+
+    def test_an_answer_remembered_by_the_old_search_is_not_believed(self):
+        d = Path(mm.MEDIA_DIR)
+        d.mkdir(parents=True, exist_ok=True)
+        old_id = d / f"lbid_{__import__('hashlib').md5(b'Mother 3|Nintendo Game Boy Advance').hexdigest()[:16]}.txt"
+        old_id.write_text("169285")  # the wrong entry, remembered by the old search
+        (d / "cart_m3.miss").write_text("miss")  # and "no cartridge", remembered by it
+        with mock.patch.object(rc, "_get", self._get([], self.PAGES)):
+            self.assertEqual(mm.lb_game_id("Mother 3", "Nintendo Game Boy Advance"), "9029")
+            self.assertIsNotNone(mm.fetch_media_art("m3", "cart", "Mother 3", "Nintendo Game Boy Advance"))  # looked for again, not skipped
+
+    def test_a_nothing_found_from_the_new_search_is_believed_for_a_week(self):
+        with mock.patch.object(rc, "_get", lambda *a, **k: b"<p>nothing</p>"):
+            self.assertIsNone(mm.fetch_media_art("g9", "cart", "Nothing Here", "Nintendo Game Boy"))
+        calls: list[str] = []
+        with mock.patch.object(rc, "_get", lambda url, **k: calls.append(url) or b""):
+            self.assertIsNone(mm.fetch_media_art("g9", "cart", "Nothing Here", "Nintendo Game Boy"))
+        self.assertEqual(calls, [])
+
+    def test_one_game_s_pictures_read_each_page_once(self):
+        calls: list[str] = []
+        with mock.patch.object(rc, "_get", self._get(calls, self.PAGES)):
+            mm.fetch_backdrop("m3", "Mother 3", "Nintendo Game Boy Advance")
+            mm.fetch_media_art("m3", "cart", "Mother 3", "Nintendo Game Boy Advance")
+            mm.fetch_screenshots("m3", "Mother 3", "Nintendo Game Boy Advance")
+        self.assertEqual(sum(u.endswith("/details/9029") for u in calls), 1)  # (not once for the background, again for the cartridge, again for the screenshots)
+        self.assertEqual(sum("/results/" in u for u in calls), len({u for u in calls if "/results/" in u}))  # nor any search twice
+
 
 
 if __name__ == "__main__":
