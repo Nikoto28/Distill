@@ -22,6 +22,18 @@ class FamilyTests(unittest.TestCase):
         self.assertEqual(builds.family_of("ID=gentoo\n"), "")
         self.assertEqual(builds.family_of(""), "")
 
+    def test_the_opensuse_family_is_recognised(self):
+        self.assertEqual(builds.family_of('ID="opensuse-tumbleweed"\nID_LIKE="opensuse suse"\n'), "opensuse")
+        self.assertEqual(builds.family_of('ID="opensuse-leap"\nID_LIKE="opensuse suse"\n'), "opensuse")
+        self.assertEqual(builds.family_of('ID="opensuse-slowroll"\n'), "opensuse")
+        self.assertEqual(builds.family_of('ID="sles"\nID_LIKE="suse"\n'), "opensuse")
+
+    def test_the_atomic_opensuse_variant_is_still_opensuse(self):
+        """MicroOS/Aeon report ID_LIKE 'opensuse suse' and have a read-only root: the script's atomic branch must
+        catch them before any live package install."""
+        self.assertEqual(builds.family_of("ID=opensuse-microos\nID_LIKE=\"opensuse suse\"\n"), "opensuse")
+        self.assertEqual(builds.family_of("ID=opensuse-aeon\nID_LIKE=\"opensuse suse\"\n"), "opensuse")
+
 
 @POSIX_ONLY  # bash
 class ScriptTests(TempDirTest):
@@ -207,6 +219,34 @@ else:
         atomic = text.index("/run/ostree-booted")
         deps = text.index("dnf install -y")
         self.assertLess(atomic, deps)  # the check comes before any package is installed
+
+    def test_the_opensuse_case_asks_zypper_for_the_verified_package_names(self):
+        """Every name here was checked against the Tumbleweed OSS x86_64 repository; openSUSE has no 'libfoo-dev'."""
+        text = builds.script_for("ares", self.tmp / "ares")
+        for expected in ("zypper install -y gcc gcc-c++", "gtk3-devel", "libcanberra-gtk3-module", "Mesa-libGL-devel",
+                         "libX11-devel", "libXrandr-devel", "alsa-devel", "libao-devel", "openal-soft-devel",
+                         "libpulse-devel", "systemd-devel", "SDL3-devel", "opensuse-tumbleweed"):
+            self.assertIn(expected, text)
+        zypper = next(line for line in text.splitlines() if "zypper install" in line and "SDL3-devel" not in line)
+        self.assertIn("Mesa-libGL-devel", zypper)
+        self.assertNotIn("libgl-dev", zypper)  # the Debian spelling must not leak into the zypper line
+
+    def test_the_atomic_hints_carry_the_same_packages_as_the_install_lines(self):
+        """A layered list that drifts from the installed one is worse than no list: compare the sets."""
+        installer_words = {"sudo", "dnf", "zypper", "install", "rpm-ostree", "transactional-update", "pkg", "echo"}
+
+        def packages(line: str) -> set[str]:
+            words = line.replace('"', " ").split()
+            return {word for word in words if not word.startswith("-") and word not in installer_words}
+
+        lines = [line.strip() for line in builds.script_for("ares", self.tmp / "ares").splitlines()]
+        for live, layered in (("dnf install", "rpm-ostree install"), ("zypper install", "transactional-update pkg install")):
+            installed = next((line for line in lines if live in line and "|| true" not in line), None)
+            hinted = next((line for line in lines if layered in line), None)
+            self.assertIsNotNone(installed, f"no live line for {live}")
+            self.assertIsNotNone(hinted, f"no layered hint for {layered}")
+            assert installed is not None and hinted is not None
+            self.assertEqual(packages(installed), packages(hinted), f"{layered} does not match {live}")
 
 
 class ToolBuildTests(TempDirTest):

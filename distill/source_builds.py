@@ -36,12 +36,31 @@ RECIPES: dict[str, dict] = {
                        "libao-devel"),
             "arch": ("sudo pacman -S --needed --noconfirm base-devel cmake ninja pkgconf git curl gtk3 libcanberra "
                      "libx11 libxrandr mesa openal alsa-lib libpulse libao"),
+            # Verified against the Tumbleweed OSS x86_64 repository: gcc/gcc-c++, make, cmake (4.4.4), pkg-config,
+            # curl, git, ninja, gtk3-devel, libcanberra-gtk3-module, Mesa-libGL-devel, alsa-devel, libao-devel,
+            # openal-soft-devel, libpulse-devel, libX11-devel, libXrandr-devel, systemd-devel (libudev.h) all exist
+            # there under these names.
+            "opensuse": ("sudo zypper install -y gcc gcc-c++ make cmake pkg-config curl git ninja gtk3-devel "
+                         "libcanberra-gtk3-module Mesa-libGL-devel libX11-devel libXrandr-devel alsa-devel libao-devel "
+                         "openal-soft-devel libpulse-devel systemd-devel"),
         },
         # SDL3 is optional and not packaged on older releases; trying it must not sink the whole install.
         "optional": {
             "debian": "sudo apt install -y libsdl3-dev || true",
             "fedora": "sudo dnf install -y SDL3-devel || true",
             "arch": "sudo pacman -S --needed --noconfirm sdl3 || true",
+            "opensuse": "sudo zypper install -y SDL3-devel || true",
+        },
+        # The same package set once more, for systems whose root is read-only: layering needs a reboot, so the script
+        # prints this line instead of running it. Fedora Atomic/Bazzite layer with rpm-ostree, MicroOS/Aeon (and any
+        # transactional-update openSUSE) with `transactional-update pkg install` (SUSE documentation for SLE Micro).
+        "atomic": {
+            "fedora": "sudo rpm-ostree install cmake ninja-build gcc gcc-c++ pkg-config git curl gtk3-devel "
+                      "libX11-devel libXrandr-devel mesa-libGL-devel openal-soft-devel alsa-lib-devel "
+                      "pulseaudio-libs-devel libao-devel",
+            "opensuse": "sudo transactional-update pkg install gcc gcc-c++ make cmake pkg-config curl git ninja "
+                        "gtk3-devel libcanberra-gtk3-module Mesa-libGL-devel libX11-devel libXrandr-devel alsa-devel "
+                        "libao-devel openal-soft-devel libpulse-devel systemd-devel",
         },
         "cmake_args": ("-G Ninja -DCMAKE_BUILD_TYPE=Release -DARES_BUILD_OFFICIAL=ON -DENABLE_IPO=OFF "
                        "-DARES_BUILD_LOCAL=OFF"),
@@ -55,13 +74,17 @@ RECIPES: dict[str, dict] = {
 
 
 def family_of(os_release: str) -> str:
-    """'debian', 'fedora', 'arch' or '' from the text of /etc/os-release."""
+    """'debian', 'fedora', 'arch', 'opensuse' or '' from the text of /etc/os-release."""
     text = os_release.lower()
     ids = re.findall(r"^(?:id|id_like)=(.*)$", text, re.MULTILINE)  # text is lowercased above
     words = {w.strip().strip('"') for chunk in ids for w in chunk.split()}
     for family, members in (("arch", {"arch", "archlinux", "manjaro", "endeavouros", "cachyos"}),
                             ("debian", {"debian", "ubuntu", "linuxmint", "pop", "zorin", "elementary", "kali"}),
-                            ("fedora", {"fedora", "rhel", "centos", "rocky", "almalinux", "bazzite", "nobara"})):
+                            ("fedora", {"fedora", "rhel", "centos", "rocky", "almalinux", "bazzite", "nobara"}),
+                            # MicroOS and Aeon report ID_LIKE="opensuse suse" too; they are openSUSE, and the script's
+                            # atomic branch is what keeps them from trying a live install on a read-only root.
+                            ("opensuse", {"opensuse", "opensuse-tumbleweed", "opensuse-leap", "opensuse-slowroll",
+                                          "suse", "sles", "sled"})):
         if words & members:
             return family
     return ""
@@ -100,15 +123,17 @@ for word in ${{ID:-}} ${{ID_LIKE:-}}; do
     arch|archlinux|manjaro|endeavouros|cachyos) FAMILY=arch ;;
     debian|ubuntu|linuxmint|pop|zorin|elementary|kali) FAMILY=debian ;;
     fedora|rhel|centos|rocky|almalinux|bazzite|nobara) FAMILY=fedora ;;
+    opensuse|opensuse-tumbleweed|opensuse-leap|opensuse-slowroll|suse|sles|sled) FAMILY=opensuse ;;
   esac
   [ -n "$FAMILY" ] && break
 done
-[ -n "$FAMILY" ] || die "This doesn't look like a Debian, Fedora or Arch system, so the package names are unknown."
+[ -n "$FAMILY" ] || die "This doesn't look like a Debian, Fedora, Arch or openSUSE system, so the package names are unknown."
 say "{recipe['title']}: building on ${{PRETTY_NAME:-$FAMILY}}"
 
-# Atomic Fedora uses already-layered dependencies; installing them requires a separate reboot.
+# Atomic systems (Fedora Atomic/Bazzite, openSUSE MicroOS/Aeon) keep their root read-only: build dependencies are
+# layered and arrive only after a reboot, so the script explains instead of running a package manager that would fail.
 ATOMIC=0
-if [ "$FAMILY" = fedora ] && [ -e /run/ostree-booted ]; then
+if [ -e /run/ostree-booted ]; then
   ATOMIC=1
   missing=""
   for tool in {' '.join(recipe['commands'])}; do
@@ -120,13 +145,16 @@ if [ "$FAMILY" = fedora ] && [ -e /run/ostree-booted ]; then
     done
   fi
   if [ -n "$missing" ]; then
-    say "This atomic Fedora system needs more layered build dependencies:$missing"
+    say "This atomic system needs more layered build dependencies:$missing"
     echo "Run this, reboot, then press the button again:"
     echo
-    echo "  sudo rpm-ostree install cmake ninja-build gcc gcc-c++ pkg-config git curl gtk3-devel libX11-devel libXrandr-devel mesa-libGL-devel openal-soft-devel alsa-lib-devel pulseaudio-libs-devel libao-devel"
+    case "$FAMILY" in
+      fedora) echo "  {recipe['atomic']['fedora']}" ;;
+      opensuse) echo "  {recipe['atomic']['opensuse']}" ;;
+    esac
     die "Missing dependencies; nothing was changed."
   fi
-  say "Using the build dependencies already layered on this atomic Fedora system."
+  say "Using the build dependencies already layered on this atomic system."
 fi
 
 # ---- dependencies ---------------------------------------------------------------------------
@@ -136,6 +164,7 @@ case "$FAMILY" in
   debian) {recipe['deps']['debian']} ;;
   fedora) {recipe['deps']['fedora']} ;;
   arch)   {recipe['deps']['arch']} ;;
+  opensuse) {recipe['deps']['opensuse']} ;;
 esac || die "Installing the build dependencies failed."
 
 # Optional pieces are tried and forgotten: SDL3 is missing from older releases, and ares works without it.
@@ -143,6 +172,7 @@ case "$FAMILY" in
   debian) {recipe['optional']['debian']} ;;
   fedora) {recipe['optional']['fedora']} ;;
   arch)   {recipe['optional']['arch']} ;;
+  opensuse) {recipe['optional']['opensuse']} ;;
 esac
 fi
 
