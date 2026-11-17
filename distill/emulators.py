@@ -88,14 +88,33 @@ class Emulator:
     build: str = ""  # catalog: a "build from source" recipe key (ares)
     status: str = ""  # catalog: how the project stands today ("" | experimental | superseded | discontinued), not whether it runs
     replaced_by: str = ""  # catalog: the id of what took over from a superseded emulator, so its page can send the person there
+    kind: str = "emulator"  # catalog: "emulator", or "tool" for a project that is not an emulator at all (AnyPS5's relinker)
+    preferred_launch: bool = False  # catalog: an extra that is what Distill starts when its emulator is launched
+    prerelease_only: bool = False  # catalog: the project publishes pre-release builds only, so "latest" is a pre-release
+    details: str = ""  # catalog: long-form explanation for the page, in markdown
+    setup: dict = field(default_factory=dict)  # catalog: how to set it up per OS ({"windows": "...", "linux": "..."})
+    dependencies: tuple[str, ...] = ()  # catalog: what has to be on the PC first
+    usage: tuple[str, ...] = ()  # catalog: command lines, shown as they would be typed
+    tool_key: str = ""  # catalog: the tool in distill/tools.py that installs this, when it is a tool (relinker)
+    extras: tuple["Emulator", ...] = ()  # catalog: optional extras of this entry (shadPS4's Qt launcher), never tiles of their own
+
+
 
 
 LEGACY_STATUSES = ("superseded", "discontinued")  # nothing to download any more; a copy the person already has still runs
 STATUSES = LEGACY_STATUSES + ("experimental",)
+KINDS = ("emulator", "tool")  # "tool": listed so its page can explain it, but there is no emulator to install or launch
+
 
 
 def _tuple(v) -> tuple:
     return tuple(v) if isinstance(v, (list, tuple)) else ((v,) if v else ())
+
+
+def _for_os(d: dict, plat: str) -> dict:
+    """The entry with its per-OS block laid over it (`"linux": {...}`). That nested block is how one entry describes another
+    system's build without losing the Windows one, and it is read before the trust rules are applied."""
+    return {**d, **d.get("linux", {})} if plat == "linux" else d
 
 
 def _emulator(d: dict, plat: str) -> Emulator:
@@ -106,9 +125,14 @@ def _emulator(d: dict, plat: str) -> Emulator:
     status = str(d.get("status") or "").strip().lower()
     if status not in STATUSES:
         status = ""
+    kind = str(d.get("kind") or "").strip().lower()
+    if kind not in KINDS:
+        kind = "emulator"
+    if kind == "tool":  # there is no emulator here: the page explains the tool, and the tool itself is installed in Settings
+        available = False
     if owner and repo and d.get("source", "github") == "github" and repo.split("/")[0].lower() != owner.lower():
         available, notes = False, f"Refused: this entry points at {repo.split('/')[0]}, not {owner}. Copies of this project carry malware."
-    if plat == "linux" and owner and any(d.get(kind) for kind in ("flatpak", "build", "wine")):
+    if plat == "linux" and owner and any(d.get(field_name) for field_name in ("flatpak", "build", "wine")):
         available, notes = False, f"Refused: Flatpak, source builds and Wine cannot verify the trusted owner {owner}. Copies of this project carry malware."
     if status in LEGACY_STATUSES:  # superseded or discontinued: the person can keep what they have, but nothing is downloaded
         available = False
@@ -123,7 +147,14 @@ def _emulator(d: dict, plat: str) -> Emulator:
         channel_repos={str(k): str(v) for k, v in (d.get("channel_repos") or {}).items()}, available=available,
         verify=bool(d.get("verify")), systems=_tuple(d.get("systems")), aliases=tuple(a for a in _tuple(d.get("aliases")) if a),
         logo=str(d.get("logo") or ""), hosts=_tuple(d.get("download_hosts")), flatpak=str(d.get("flatpak") or ""),
-        wine=bool(d.get("wine")), build=str(d.get("build") or ""), status=status, replaced_by=str(d.get("replaced_by") or ""))
+        wine=bool(d.get("wine")), build=str(d.get("build") or ""), status=status, replaced_by=str(d.get("replaced_by") or ""),
+        kind=kind, preferred_launch=bool(d.get("preferred_launch")),
+        prerelease_only=bool(d.get("prerelease_only")), details=str(d.get("details") or ""),
+        setup={str(k): str(v) for k, v in (d.get("setup") or {}).items() if v},
+        dependencies=tuple(str(x) for x in _tuple(d.get("dependencies")) if x),
+        usage=tuple(str(x) for x in _tuple(d.get("usage")) if x), tool_key=str(d.get("tool_key") or ""),
+        extras=tuple(_emulator(_for_os(extra, plat), plat) for extra in d.get("extras") or []
+                     if isinstance(extra, dict) and extra.get("id") and extra.get("name")))
 
 
 def bundled_manifest() -> Path:
@@ -170,8 +201,7 @@ def load_catalog(paths: Iterable[Path] | None = None, plat: str = "") -> list[Em
                 if not isinstance(d, dict):
                     continue
                 # Resolve Linux-only fields before enforcing the bundled trust policy below.
-                if plat == "linux":
-                    d = {**d, **d.get("linux", {})}
+                d = _for_os(d, plat)
                 em = _emulator(d, plat)
             except (KeyError, TypeError, AttributeError):
                 continue
@@ -186,6 +216,34 @@ def load_catalog(paths: Iterable[Path] | None = None, plat: str = "") -> list[Em
     def order(e: Emulator) -> tuple:  # the biggest group first (a tie A to Z), and the emulators A to Z inside each
         return (-size[e.group], e.group.casefold(), e.name.casefold())
     return sorted(out.values(), key=order)
+
+
+def all_entries(catalog: Iterable[Emulator]) -> list[Emulator]:
+    """Every entry the catalog knows: the emulators themselves and the optional extras nested under them. Extras are not
+    entries of their own — they never get a tile or change the count — but they install, update and launch like one."""
+    out: list[Emulator] = []
+    for e in catalog:
+        out += [e, *e.extras]
+    return out
+
+
+def companions(em: Emulator) -> tuple[Emulator, ...]:
+    """The optional extras belonging to one entry (shadPS4's Qt launcher, say). Each installs into a folder of its own, so
+    the emulator is never replaced by its extra and the extra can be installed whether or not the emulator is."""
+    return em.extras
+
+
+def installed_companion(em: Emulator, store: rc.Store) -> rc.Installed | None:
+    """The extra that should be started in place of the emulator's own program: what `launch` uses when it has a store."""
+    for extra in em.extras:
+        if not extra.preferred_launch:
+            continue
+        inst = store.installed(extra.id)
+        if inst is not None and inst.exe_path().exists():
+            return inst
+    return None
+
+
 
 
 def for_this_os(em: Emulator, plat: str = "") -> bool:
@@ -862,6 +920,22 @@ def hosts_linux_download(em: Emulator) -> bool:
     return any(str(key).startswith("linux") for key in em.asset) or bool(em.hosts)
 
 
+def _with_newest_release(em: Emulator, rels: list[rc.Release], store: rc.Store | None, force: bool) -> list[rc.Release]:
+    """The newest release first, pre-release included, for a project that publishes nothing but pre-releases.
+
+    GitHub calls a release "latest" only when it is not a pre-release, so for such a project `/releases/latest` answers
+    404 — that is not "no releases", and `rc.latest_release` answers it from the release list. Asking both keeps the
+    newest build in front and never turns that 404 into an empty page.
+    """
+    try:
+        newest = rc.latest_release(em.repo, store, force)
+    except rc.RecompError:
+        return rels  # the list is still good: use it rather than fail the whole check
+    if newest is None or not newest.tag or any(r.tag == newest.tag for r in rels):
+        return rels
+    return [newest, *rels]
+
+
 def _plan(em: Emulator, store: rc.Store, force: bool = False) -> tuple[list[InstallOption], list[str]]:
     """(options best first, reasons each route was refused). One lookup for the whole page: the preferred download, the
     alternatives and the sentence to show when there are none all come from here."""
@@ -889,6 +963,8 @@ def _plan(em: Emulator, store: rc.Store, force: bool = False) -> tuple[list[Inst
     except rc.RecompError as exc:
         rels = []
         reasons.append(str(exc))  # said plainly, and the Flatpak or source route below may still work
+    if rels and em.prerelease_only:
+        rels = _with_newest_release(em, rels, store, force)
     if rels:
         found, why = _release_options(em, _channel_order(rels, chan), rc.machine_key())
         options += found
@@ -957,12 +1033,15 @@ def stamp_of(em: Emulator, rel: rc.Release, asset: dict) -> str:
 
 
 def label_of(em: Emulator, rel: rc.Release, asset: dict) -> str:
-    """The version as the person reads it."""
+    """The version as the person reads it. A project that publishes nothing but pre-releases says so in the label, so a
+    build is never mistaken for a stable version."""
     if em.version_from == "asset":
-        return re.sub(r"(\.tar\.\w+|\.\w+)$", "", asset["name"])
-    if em.version_from == "published_at":
-        return f"{rel.tag} ({rel.published})" if rel.published else rel.tag
-    return rel.tag
+        text = re.sub(r"(\.tar\.\w+|\.\w+)$", "", asset["name"])
+    elif em.version_from == "published_at":
+        text = f"{rel.tag} ({rel.published})" if rel.published else rel.tag
+    else:
+        text = rel.tag
+    return f"{text} (pre-release)" if rel.prerelease and em.prerelease_only else text
 
 
 def update_state(em: Emulator, inst: rc.Installed | None, latest) -> str:
@@ -1223,7 +1302,9 @@ def scan_folder(root: Path, catalog: Iterable[Emulator], plat: str = "", depth: 
     """Emulators already in `root`: a folder named like one (PCSX2, duckstation-v0.1, Dolphin Emulator) with its executable
     inside, or a loose AppImage / exe named like one. The first match for each emulator wins."""
     plat = plat or rc.platform_key()
-    matchers = {em.id: (em, _Matcher(em)) for em in catalog if for_this_os(em, plat)}
+    # A tool entry (AnyPS5's relinker) is not an emulator install: it is never looked for as one. An entry's optional
+    # extra is: the shadPS4 Qt launcher in its own folder is found, and belongs to the extra, not to shadPS4 itself.
+    matchers = {e.id: (e, _Matcher(e)) for e in all_entries(catalog) if for_this_os(e, plat) and e.kind != "tool"}
     found: dict[str, Found] = {}
 
     def best(name: str) -> Emulator | None:
@@ -1339,10 +1420,17 @@ def link(store: rc.Store, em: Emulator, path: Path, plat: str = "") -> Found:
     return f
 
 
-def launch(em: Emulator | None, inst: rc.Installed) -> None:
-    """Linked Windows executables need Wine too; installed shell launchers already provide it."""
+def launch(em: Emulator | None, inst: rc.Installed, store: rc.Store | None = None, cli: bool = False) -> None:
+    """Start an install. Linked Windows executables need Wine too; installed shell launchers already provide it.
+
+    When the entry has an optional extra that is preferred for launching and the person has it installed (shadPS4's Qt
+    launcher), that is what starts: the emulator's own program stays exactly where it is, and `cli=True` starts it
+    instead, so a command-line launch is always available.
+    """
     if rc.platform_key() == "linux" and em is not None and not launchable(em):
         raise rc.RecompError(em.notes or f"{em.name} is unavailable.")
+    if em is not None and store is not None and not cli:
+        inst = installed_companion(em, store) or inst
     exe = inst.exe_path()
     if rc.platform_key() != "linux" or em is None or not em.wine or exe.suffix.lower() != ".exe":
         env = appimage_env(exe)  # None for everything that isn't an AppImage, so an ordinary launch passes nothing
@@ -1713,6 +1801,8 @@ def status_text(em: Emulator, inst: rc.Installed | None, latest) -> tuple[str, s
     """(code, short text) for the list: code is one of unavailable | missing | gone | current | update | unknown, or the
     project's own state (superseded | discontinued) when there is nothing to download and nothing installed."""
     legacy = em.status in LEGACY_STATUSES
+    if em.kind == "tool":  # there is no emulator here to install or start: the page explains what the tool does instead
+        return "unavailable", "Tool, not an emulator"
     if not for_this_os(em):
         return "unavailable", f"Not on {rc.platform_key()}"
     if not em.available and not legacy:

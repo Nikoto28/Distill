@@ -1030,6 +1030,49 @@ def releases(repo: str, store: Store | None = None, force: bool = False) -> list
     return [_release_of(d) for d in keep]
 
 
+def latest_release(repo: str, store: Store | None = None, force: bool = False) -> Release | None:
+    """The newest release in a repository, pre-release included (None only when it has no release at all).
+
+    GitHub marks a release "latest" only when it is not a pre-release. In a repository whose every release is a
+    pre-release — shadps4-emu/shadps4-qtlauncher has exactly one, and it is — `/releases/latest` answers **404**. That
+    404 says nothing about the project having no releases, so it is answered from the release list (which holds
+    pre-releases) rather than reported as "no releases". Read from the cache for an hour like the listings.
+    """
+    key = f"latest:{repo}"
+    if store and not force and (hit := store.cache_get(key)) is not None:
+        return _release_of(hit) if isinstance(hit, dict) and hit else None
+    url = f"https://api.github.com/repos/{repo}/releases/latest"
+    found: Release | None = None
+    try:
+        raw = json.loads(_get(url, store.token() if store else "", "application/vnd.github+json"))
+        if isinstance(raw, dict) and not raw.get("draft") and raw.get("tag_name"):
+            found = _release_of(raw)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:  # 404 here means "no release GitHub calls latest", not "no releases"
+            if store and (stale := store.cache_stale(key)) is not None and isinstance(stale, dict):
+                return _release_of(stale) if stale else None
+            if exc.code in (403, 429):
+                raise RecompError("GitHub is rate-limiting this PC. Try again later, or add a GitHub key under Settings > API keys > Updates.") from exc
+            raise RecompError(f"GitHub answered {exc.code}.") from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        if store and (stale := store.cache_stale(key)) is not None and isinstance(stale, dict):
+            return _release_of(stale) if stale else None
+        raise RecompError("Couldn't reach GitHub.") from exc
+    if found is None:
+        try:
+            rels = releases(repo, store, force)
+        except RecompError:
+            rels = []  # the list 404s too: this repository really has no release at all
+        found = rels[0] if rels else None
+    if store:
+        store.cache_put(key, {} if found is None else {
+            "tag_name": found.tag, "name": found.name, "body": found.body, "published_at": found.published,
+            "prerelease": found.prerelease, "html_url": found.url,
+            "assets": [{"name": a.get("name", ""), "size": a.get("size", 0), "browser_download_url": a.get("url", ""),
+                        "digest": a.get("digest", "")} for a in found.assets]})
+    return found
+
+
 _TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
 _OS_WORDS = {"windows": {"windows", "win", "win32", "win64", "w64", "x86_64-pc-windows"}, "macos": {"macos", "mac", "osx", "darwin", "apple"},
              "linux": {"linux", "appimage", "gnu"}}
