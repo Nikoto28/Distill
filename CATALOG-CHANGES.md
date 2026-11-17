@@ -69,6 +69,13 @@ route — Flathub — was already right), `ares` (source build was right; a Flat
 - **Executable permissions.** Verified in behaviour, not assumed: Python's `tarfile` extraction with the `data` filter
   keeps `kyty_launcher` at `-rwxr-xr-x`, and `recomps.Installer.install` additionally chmods the registered executable
   (`exe.chmod(mode | 0o111)`) — proved by a test that unpacks a tar whose members carry no execute bit at all.
+- **Which of the two is the window.** Read statically from the binaries (not executed): `file` reports both as
+  `ELF 64-bit LSB pie executable, x86-64`; `readelf -d` shows `kyty_launcher` linking **`libQt6Widgets.so.6`,
+  `libQt6Gui.so.6`, `libQt6Core.so.6`, `libQt6DBus.so.6`, `libGLX.so.0`, `libOpenGL.so.0`** with `RPATH [$ORIGIN/lib]`,
+  and the archive ships the platform plugins that make a window possible (`plugins/platforms/libqxcb.so`,
+  `libqwayland.so`, `libqoffscreen.so`, `qt.conf`). `kyty_emulator` links **no GUI toolkit at all** — only
+  `libm`, `libstdc++`, `libgcc_s` and `libc` — so starting it can never open the launcher window, which is exactly the
+  symptom the card describes.
 - **Verified by test.** `KytyPS5Tests` (5 tests): the launch target is `kyty_launcher` and not `kyty_emulator` or
   `kyty_updater` on Linux; the Windows target is `kyty_launcher.exe`; the recorded release resolves to the official
   Linux tarball as a portable archive; an install from that layout lands on `kyty_launcher` and is made executable.
@@ -76,8 +83,9 @@ route — Flathub — was already right), `ares` (source build was right; a Flat
   verified on a Windows host** — there is none here, and running the binary is forbidden — so "the Windows launcher
   opens" is *not* claimed. What is verified is that the file exists in the published archive with that exact name.
 - **Could not verify.** That `kyty_launcher` opens a window on this host: launching a downloaded third-party binary is
-  forbidden by the card. Its Qt platform plugins and libraries are present in the archive, and Distill's launch path is
-  covered by fixtures. The project's runtime dependencies beyond what it bundles were not audited.
+  forbidden by the card. What is established is that it is a Qt 6 Widgets GUI program (see above), that the archive
+  carries the Qt platform plugins and libraries it needs, and that Distill's launch path passes it to the system
+  unchanged. The project's runtime dependencies beyond what it bundles were not audited.
 
 ### `shadps4` — shadPS4: the CLI emulator, plus an optional Qt launcher
 
