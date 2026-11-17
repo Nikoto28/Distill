@@ -72,6 +72,8 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self._em_by_id: dict[str, em.Emulator] = {}  # emulators and forks
         self._em_store: rc.Store | None = None
         self._em_latest: dict[str, object] = {}  # id -> (Release, asset) | error text
+        self._em_options: dict[str, list] = {}  # id -> every install method the project offers here, best first
+        self._em_pick: dict[str, int] = {}  # id -> the index into _em_options the person chose (0 until they choose)
         self._em_busy: dict[str, threading.Event] = {}  # installs/removals in progress; the Event cancels installs
         self._em_removing: set[str] = set()
         self._em_prog: dict[str, str] = {}  # id -> what its install is doing now
@@ -259,6 +261,12 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self.emd_main.setMinimumHeight(40)
         self.emd_main.setMinimumWidth(112)
         self.emd_main.clicked.connect(self._em_main_action)
+        self.emd_method = QComboBox()
+        self.emd_method.setMinimumHeight(40)
+        self.emd_method.setToolTip("How to install it. Distill prefers an AppImage, then an archive that holds one, then "
+                                   "Flatpak, then a portable archive; this lets you pick another way when the project offers one.")
+        self.emd_method.hide()
+        self.emd_method.activated.connect(self._em_method_picked)
         self.emd_build = QPushButton("Build from source")
         self.emd_build.hide()
         self.emd_build.setToolTip("Runs a script in a terminal: it installs your distribution's build tools, fetches the "
@@ -286,7 +294,7 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         symbolize(self.emd_folder, "folder-open", "Open folder")
         for w in (self.emd_remove, self.emd_unfork):
             w.setStyleSheet(danger)  # only the hover is red: the destructive buttons sit apart and stay quiet until pointed at
-        for w in (self.emd_main, self.emd_build, self.emd_launch, self.emd_folder, self.emd_locate):
+        for w in (self.emd_main, self.emd_method, self.emd_build, self.emd_launch, self.emd_folder, self.emd_locate):
             row.addWidget(w)
         row.addStretch(1)
         row.addWidget(self.emd_remove)
@@ -579,7 +587,8 @@ class EmulatorMixin(CoresMixin, LdnMixin):
                    can_update=code == "update" and em.can_update(inst) and isinstance(self._em_latest.get(e.id), tuple), busy=busy, tip=e.notes)
 
     def _em_colour(self, code: str):
-        return {"update": T.warn, "current": T.ok, "unknown": T.fg3, "gone": T.bad, "unavailable": T.fg3, "missing": T.fg3}.get(code, T.fg3)
+        return {"update": T.warn, "current": T.ok, "unknown": T.fg3, "gone": T.bad, "unavailable": T.fg3, "missing": T.fg3,
+                "superseded": T.warn, "discontinued": T.fg3}.get(code, T.fg3)
 
     def _em_tile_clicked(self, key: str) -> None:
         mode = next(m for k, _c, m in TILES if k == key)
@@ -926,7 +935,10 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         line = ""
         if inst is None:
             if not em.downloadable(e):
-                why = _text if e.notes and not e.description else e.notes or "There is nothing to download for this PC yet."
+                if e.status in em.LEGACY_STATUSES and e.notes:
+                    why = e.notes  # superseded or discontinued: what happened is the useful thing to read
+                else:
+                    why = _text if e.notes and not e.description else e.notes or "There is nothing to download for this PC yet."
                 line = f'<span style="color:{mute}">{html.escape(why)}</span>'  # (a downloadable one just says "Not installed" in the pill)
         elif code == "gone":
             line = f'<span style="color:{bad}">Its files are missing from {html.escape(inst.folder)}.</span> Reinstall it, or point Distill at the copy you have.'
@@ -954,6 +966,12 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             self.emd_notes.setMarkdown("_Release notes unavailable._")
         elif em.downloadable(e):
             rows.append(("Latest release", "Checking...", None))
+        options = [option for option in (self._em_options.get(e.id) or []) if not option.manual]
+        if len(options) > 1:  # the project offers more than one way here: say which one the button will use
+            rows.append(("Installs with", options[min(self._em_pick.get(e.id, 0), len(options) - 1)].text(), None))
+        manual = [option for option in (self._em_options.get(e.id) or []) if option.manual]
+        if manual:  # published, but installing it is the person's own job: never a button Distill can press
+            rows.append(("Also published", f"{manual[0].asset.get('name', '')} (install it with your package manager)", T.fg3))
         if inst:
             rows.append(("Location", break_path(inst.folder), None))
         if games := em.games_for(e, self._em_counts):
@@ -965,9 +983,20 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self.emd_main.setText("Cancel" if busy else "Update" if state == "update" else "Install" if inst is None else
                               "Update to latest" if state == "unknown" and can_get else "Reinstall")
         self.emd_main.setEnabled(busy or can_get)
+        replacement = self._em_by_id.get(e.replaced_by) if e.replaced_by else None
+        if not busy and e.status in em.LEGACY_STATUSES:
+            # Nothing left to download here: the button either opens what took over, or says why it does nothing.
+            if inst is not None:
+                self.emd_main.setText("Not available")
+                self.emd_main.setEnabled(False)
+            else:
+                self.emd_main.setText(f"Open {replacement.name}" if replacement is not None
+                                      else "Superseded" if e.status == "superseded" else "Discontinued")
+                self.emd_main.setEnabled(replacement is not None)
         if rc.platform_key() == "linux" and e.id in self._em_removing:
             self.emd_main.setText("Uninstalling...")
             self.emd_main.setEnabled(False)
+        self._em_method_sync(e, busy)
         self.emd_main.setToolTip("Distill won't update an install that shares its folder with other programs. Move it to a folder of its own and link it again."
                                  if inst and inst.linked == "file" else "")
         animate, self._em_snap = not self._em_snap, False  # buttons come and go smoothly when this emulator's state changes
@@ -983,7 +1012,7 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             show(self.emd_main, not buildable)
         show(self.emd_launch, inst is not None)
         self.emd_launch.setEnabled(inst is not None and not busy and code != "gone"
-                                   and (rc.platform_key() != "linux" or e.available))
+                                   and (rc.platform_key() != "linux" or em.launchable(e)))
         show(self.emd_folder, inst is not None)
         show(self.emd_locate, inst is None or bool(inst.linked) or code == "gone")
         self.emd_locate.setEnabled(not busy)
@@ -996,11 +1025,42 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self._ldn_sync()
 
     # ---- latest release / update check ------------------------------------------------------------------------
+    def _em_chosen(self, e: em.Emulator):
+        """(release, file) of the install method the person picked, or of the one Distill prefers; None when the last
+        check found nothing to install."""
+        options = [option for option in (self._em_options.get(e.id) or []) if not option.manual]
+        if options:
+            index = min(self._em_pick.get(e.id, 0), len(options) - 1)
+            return options[index].pair()
+        latest = self._em_latest.get(e.id)
+        return latest if isinstance(latest, tuple) else None
+
+    def _em_method_sync(self, e: em.Emulator, busy: bool) -> None:
+        """Show the other ways this project can be installed, when it offers more than one, and keep the person's choice."""
+        options = [option for option in (self._em_options.get(e.id) or []) if not option.manual]
+        wanted = [option.text() for option in options]
+        if self.emd_method.count() != len(wanted) or any(
+                self.emd_method.itemText(i) != text for i, text in enumerate(wanted)):
+            self.emd_method.clear()
+            self.emd_method.addItems(wanted)
+        index = min(self._em_pick.get(e.id, 0), max(len(wanted) - 1, 0))
+        self.emd_method.setCurrentIndex(index)
+        self.emd_method.setVisible(len(wanted) > 1 and not busy)
+
+    def _em_method_picked(self, index: int) -> None:
+        """The person chose another install method: install and download facts follow the choice, not the default."""
+        e = self._em_by_id.get(self._em_current)
+        if e is None:
+            return
+        self._em_pick[e.id] = max(0, int(index))
+        self._em_refresh_detail()
+
     def _em_fetch_latest(self, e: em.Emulator, force: bool = False) -> None:
         store = self.em_store
 
         def work() -> None:
-            self.ui_q.put(("emu_latest", e.id, em.latest_for(e, store, force)))
+            latest, options = em.check(e, store, force)  # one lookup: the preferred download and every alternative
+            self.ui_q.put(("emu_latest", e.id, latest, options))
         threading.Thread(target=work, daemon=True).start()
 
     def _em_check_updates(self, quiet: bool = False) -> None:
@@ -1019,7 +1079,8 @@ class EmulatorMixin(CoresMixin, LdnMixin):
 
         def work() -> None:
             for e in todo:
-                self.ui_q.put(("emu_latest", e.id, em.latest_for(e, store, force=not quiet)))
+                latest, options = em.check(e, store, not quiet)
+                self.ui_q.put(("emu_latest", e.id, latest, options))
             if not quiet:
                 self.ui_q.put(("emu_note", "Update check finished."))
         threading.Thread(target=work, daemon=True).start()
@@ -1030,6 +1091,8 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             return
         em.set_channel(self.em_store, e, "nightly" if index == 1 else "stable")
         self._em_latest.pop(e.id, None)
+        self._em_options.pop(e.id, None)
+        self._em_pick.pop(e.id, None)
         self.emd_msg.setText("Looking for the newest build on that channel...")
         self._em_refresh_detail()
         self._em_fetch_latest(e)
@@ -1053,8 +1116,13 @@ class EmulatorMixin(CoresMixin, LdnMixin):
 
     def _em_main_action(self) -> None:
         e = self._em_by_id.get(self._em_current)
-        if e is not None:
-            self._em_begin_install(e)
+        if e is None:
+            return
+        if (e.status in em.LEGACY_STATUSES and self.em_store.installed(e.id) is None
+                and e.replaced_by in self._em_by_id):
+            self._em_show_detail(e.replaced_by)  # the button reads "Open Azahar": take the person to what took over
+            return
+        self._em_begin_install(e)
 
     def _em_build_from_source(self) -> None:
         """A project that publishes no Linux binary: write the build script and run it in a terminal of its own.
@@ -1107,8 +1175,8 @@ class EmulatorMixin(CoresMixin, LdnMixin):
             self._em_busy[e.id].set()
             self._em_say("Cancelling...")
             return
-        latest = self._em_latest.get(e.id)
-        if not isinstance(latest, tuple):
+        latest = self._em_chosen(e)  # the method the person picked on the page, else the one Distill prefers
+        if latest is None:
             return
         inst = self.em_store.installed(e.id)
         if why := em.update_blocked(e, inst):  # a protected folder (Program Files): nothing is started, so nothing can hang
@@ -1386,6 +1454,9 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         name = ev[0]
         if name == "emu_latest":
             self._em_latest[ev[1]] = ev[2]
+            self._em_options[ev[1]] = list(ev[3]) if len(ev) > 3 else []
+            if self._em_pick.get(ev[1], 0) >= len(self._em_options[ev[1]]):
+                self._em_pick[ev[1]] = 0
             if ev[1] == self._em_current or self._em_on_parent_page(ev[1]):
                 self._em_refresh_detail()
             if self.em_views.currentIndex() == 0:
