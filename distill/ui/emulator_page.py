@@ -357,6 +357,37 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         left.addWidget(self.emd_cores_card)
         self.emd_ldn_card = self._ldn_build_card()  # shown on Ryujinx's page only
         left.addWidget(self.emd_ldn_card)
+        self.emd_tool_card = Card()  # shown on an entry that is a tool, not an emulator (AnyPS5's relinker)
+        self.emd_tool_card.lay.setContentsMargins(20, 16, 20, 18)
+        self.emd_tool_card.lay.setSpacing(10)
+        tool_head = section_header("What it does", "info")
+        self.emd_tool_card.add(tool_head)
+        self.emd_tool_body = QTextBrowser()
+        self.emd_tool_body.setOpenExternalLinks(True)
+        self.emd_tool_body.setMinimumHeight(220)
+        self.emd_tool_card.add(self.emd_tool_body)
+        self.emd_tool_where = hint("", live=True)
+        self.emd_tool_card.add(self.emd_tool_where)
+        self.emd_open_tools = QPushButton("Open Settings > Tools")
+        self.emd_open_tools.setToolTip("Distill installs this tool there, with the rest of them.")
+        symbolize(self.emd_open_tools, "settings", "Open Settings > Tools")
+        self.emd_open_tools.clicked.connect(lambda: self._open_settings(0))
+        tool_row = QHBoxLayout()
+        tool_row.addWidget(self.emd_open_tools)
+        tool_row.addStretch(1)
+        self.emd_tool_card.add(tool_row)
+        left.addWidget(self.emd_tool_card)
+        self.emd_extras_card = Card()  # an emulator's optional extras (shadPS4's Qt launcher)
+        self.emd_extras_card.lay.setContentsMargins(20, 16, 20, 16)
+        self.emd_extras_card.lay.setSpacing(10)
+        extras_head = section_header("Optional extras", "plus")
+        self.emd_extras_card.add(extras_head)
+        self.emd_extras_box = QWidget()
+        self.emd_extras_lay = QVBoxLayout(self.emd_extras_box)
+        self.emd_extras_lay.setContentsMargins(0, 0, 0, 0)
+        self.emd_extras_lay.setSpacing(10)
+        self.emd_extras_card.add(self.emd_extras_box)
+        left.addWidget(self.emd_extras_card)
         self.emd_forks_card = Card()
         self.emd_forks_card.lay.setContentsMargins(20, 16, 20, 16)
         self.emd_forks_card.lay.setSpacing(10)
@@ -468,7 +499,8 @@ class EmulatorMixin(CoresMixin, LdnMixin):
 
     def _em_reload_forks(self) -> None:
         self._em_forks = em.load_forks(self._em_catalog)
-        self._em_by_id = {e.id: e for e in (*self._em_catalog, *self._em_forks)}
+        # optional extras are looked up like entries (they install, update and launch), but they are never tiles
+        self._em_by_id = {e.id: e for e in (*em.all_entries(self._em_catalog), *self._em_forks)}
 
     def _em_apply_catalog(self, catalog: list[em.Emulator], base: bool = False) -> None:
         if base:
@@ -828,6 +860,9 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self.emd_links.setText("".join(f'<p style="margin: 0 0 8px 0;"><a href="{html.escape(u, quote=True)}" style="color: {accent}; '
                                        f'text-decoration: none;">{t}&nbsp;&nbsp;↗</a></p>' for t, u in links))
         self.emd_links_card.setVisible(bool(links))
+        self._em_fill_tool(e)
+        self.emd_tool_card.setVisible(e.kind == "tool")
+        self.emd_extras_card.setVisible(bool(e.extras))
         self.emd_channel.blockSignals(True)
         self.emd_channel_box.setVisible(len(e.channels) > 1)
         self.emd_channel.setCurrentIndex(1 if em.channel_of(self.em_store, e) == "nightly" else 0)
@@ -836,11 +871,12 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         self.emd_notes_toggle.setChecked(False)
         self.emd_bar.setValue(0)
         self.emd_msg.setText("")
-        self.emd_forks_card.setVisible(parent is None)
+        self.emd_forks_card.setVisible(parent is None and e.kind != "tool")
         self.emd_unfork.setVisible(parent is not None)
+        self._em_extras_sig = None  # a different entry: its extras are laid out afresh
         self._em_refresh_detail()
-        for x in (e, *em.forks_of(self._em_forks, e.id)):
-            if x.id not in self._em_latest:
+        for x in (e, *[x for x in e.extras], *em.forks_of(self._em_forks, e.id)):
+            if x.id not in self._em_latest and em.downloadable(x):
                 self._em_fetch_latest(x)
         if leaving is not None:
             self._em_fly_to_page(leaving)
@@ -848,6 +884,140 @@ class EmulatorMixin(CoresMixin, LdnMixin):
     def _em_toggle_notes(self, open_: bool) -> None:
         motion.set_visible(self.emd_notes, open_, axis="height", animate=not self._em_snap)
         self._em_notes_title()
+
+    @staticmethod
+    def _em_tool_name(e: em.Emulator) -> str:
+        """What Settings > Tools calls this tool (AnyPS5's relinker), so the page names the thing the person will find there."""
+        try:
+            from .. import tools
+            cls = tools.manager_for(e.tool_key)
+            return getattr(cls, "NAME", "") or e.tool_key
+        except Exception:  # the tool list is a convenience here: never let it break the page
+            return e.tool_key
+
+    def _em_fill_tool(self, e: em.Emulator) -> None:
+        """An entry that is a tool, not an emulator: what it does, how it is set up on each system, what it needs and how
+        it is run from a terminal. Nothing here is installable as an emulator, and the page never pretends otherwise."""
+        if e.kind != "tool":
+            return
+        parts = [e.details.strip() or e.notes]
+        for key, label in (("linux", "Linux"), ("windows", "Windows"), ("macos", "macOS")):
+            if text := e.setup.get(key, ""):
+                parts.append(f"**Setup on {label}.** {text}")
+        if e.dependencies:
+            parts.append("**Needs:**\n\n" + "\n".join(f"- {one}" for one in e.dependencies))
+        if e.usage:
+            parts.append("**From a terminal:**\n\n```\n" + "\n".join(e.usage) + "\n```")
+        self.emd_tool_body.setMarkdown("\n\n".join(p for p in parts if p))
+        if e.tool_key:
+            self.emd_tool_where.setText(f"Distill installs this under Settings > Tools as the {self._em_tool_name(e)}. "
+                                        f"Nothing is installed from this page.")
+        else:
+            self.emd_tool_where.setText("Install it by hand from the project page; there is nothing for Distill to install.")
+        self.emd_open_tools.setVisible(bool(e.tool_key))
+
+    def _em_refresh_tool(self, e: em.Emulator) -> None:
+        """The state of a tool entry's page: no install, launch or remove button, and the facts say where it lives."""
+        mute = T.fg3.name()
+        _code, text = em.status_text(e, None, None)
+        self.emd_status.setText(text)
+        T.bind_css(self.emd_status, lambda: pill_css(T.fg3))
+        self.emd_state.setText(f'<span style="color:{mute}">This entry is a tool, not an emulator: there is nothing here '
+                              f'to install or start. Distill ships it under Settings > Tools.</span>')
+        self.emd_state.setVisible(True)
+        rows: list[tuple[str, str, object]] = [("Project", e.repo or "-", None)]
+        if e.tool_key:
+            rows.append(("Installed with", f"Settings > Tools > {self._em_tool_name(e)}", None))
+        rows.append(("Runs on", ", ".join(e.platforms), None))
+        self.emd_facts.set_facts(rows)
+        for widget in (self.emd_main, self.emd_method, self.emd_build, self.emd_launch, self.emd_folder, self.emd_locate,
+                       self.emd_remove, self.emd_unfork, self.emd_bar, self.emd_notes_card, self.emd_extras_card,
+                       self.emd_forks_card, self.emd_channel_box):
+            widget.setVisible(False)
+        self.emd_tool_card.setVisible(True)
+        self._em_notes_title()
+
+    def _em_refresh_extras(self, e: em.Emulator) -> None:
+        """One row per optional extra: what it is, whether it is installed, and what can be done about it. An extra installs
+        into a folder of its own, so it never touches the emulator it belongs to."""
+        extras = em.companions(e)
+        self.emd_extras_card.setVisible(bool(extras))
+        if not extras:
+            return
+        # Rebuild only when something about them changed, so a refresh during an install doesn't rebuild under the mouse.
+        sig = tuple((x.id, bool(self.em_store.installed(x.id)), x.id in self._em_busy,
+                     self._em_latest.get(x.id)) for x in extras)
+        if sig == getattr(self, "_em_extras_sig", None):
+            return
+        self._em_extras_sig = sig
+        clear_layout(self.emd_extras_lay)
+        for extra in extras:
+            self.emd_extras_lay.addWidget(self._em_extra_row(e, extra))
+
+    def _em_extra_row(self, parent: em.Emulator, extra: em.Emulator) -> QWidget:
+        inst = self.em_store.installed(extra.id)
+        latest = self._em_latest.get(extra.id)
+        busy = extra.id in self._em_busy
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        title = QLabel(extra.name)
+        title.setStyleSheet("font-weight: 600;")
+        head.addWidget(title)
+        if extra.prerelease_only or extra.status == "experimental":
+            pill = QLabel("PRE-RELEASE  ·  EXPERIMENTAL")
+            T.bind_css(pill, lambda: pill_css(T.warn))
+            head.addWidget(pill)
+        head.addStretch(1)
+        lay.addLayout(head)
+        lay.addWidget(hint(extra.notes))
+        if busy:
+            state = self._em_prog.get(extra.id, "Working...")
+        elif inst is not None:
+            state = f"Installed {inst.version}".strip()
+            if isinstance(latest, tuple) and em.update_state(extra, inst, latest) == "update":
+                state += " - an update is available"
+        elif isinstance(latest, tuple):
+            state = f"Latest build: {em.label_of(extra, latest[0], latest[1])}"
+        elif isinstance(latest, str):
+            state = latest
+        else:
+            state = "Checking for the latest build..."
+        lay.addWidget(hint(state))
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        if inst is None:
+            get = QPushButton("Install" + (" (pre-release)" if extra.prerelease_only else ""))
+            get.setToolTip("Installs into a folder of its own: the emulator you already have is not touched.")
+            get.setEnabled(not busy and isinstance(latest, tuple))
+            get.clicked.connect(lambda _c=False, x=extra: self._em_begin_install(x))
+            row.addWidget(get)
+        else:
+            run = QPushButton("Launch")
+            run.setEnabled(not busy)
+            run.clicked.connect(lambda _c=False, x=extra: self._em_launch_id(x.id))
+            row.addWidget(run)
+            upd = QPushButton("Update")
+            upd.setEnabled(not busy and isinstance(latest, tuple) and em.can_update(inst))
+            upd.clicked.connect(lambda _c=False, x=extra: self._em_begin_install(x))
+            row.addWidget(upd)
+            folder = QPushButton("Open folder")
+            folder.clicked.connect(lambda _c=False, i=inst: QDesktopServices.openUrl(QUrl.fromLocalFile(i.folder)))
+            row.addWidget(folder)
+            drop = QPushButton("Remove")
+            drop.clicked.connect(lambda _c=False, x=extra: self._em_remove_id(x.id))
+            row.addWidget(drop)
+        if extra.preferred_launch and self.em_store.installed(parent.id) is not None:
+            cli = QPushButton(f"Launch {parent.name} without the launcher")
+            cli.setToolTip("Starts the emulator's own program, the way a terminal would.")
+            cli.clicked.connect(lambda _c=False: self._em_launch_id(parent.id, cli=True))
+            row.addWidget(cli)
+        row.addStretch(1)
+        lay.addLayout(row)
+        return box
 
     def _em_notes_title(self) -> None:
         latest = self._em_latest.get(self._em_current)
@@ -927,6 +1097,10 @@ class EmulatorMixin(CoresMixin, LdnMixin):
         e = self._em_by_id.get(self._em_current)
         if e is None:
             return
+        if e.kind == "tool":  # nothing to install, launch or remove: the page explains the tool instead
+            self._em_refresh_tool(e)
+            return
+        self._em_refresh_extras(e)
         inst = self.em_store.installed(e.id)
         latest = self._em_latest.get(e.id)
         busy = e.id in self._em_busy
@@ -1251,13 +1425,14 @@ class EmulatorMixin(CoresMixin, LdnMixin):
     def _em_launch(self) -> None:
         self._em_launch_id(self._em_current)
 
-    def _em_launch_id(self, rid: str) -> None:
+    def _em_launch_id(self, rid: str, cli: bool = False) -> None:
         inst = self.em_store.installed(rid)
         if inst is None:
             return
         try:
-            em.launch(self._em_by_id.get(rid), inst)
-            self._em_say("Started.")
+            # `cli=True` starts the emulator's own program even when an extra (shadPS4's Qt launcher) would be used
+            em.launch(self._em_by_id.get(rid), inst, self.em_store, cli=cli)
+            self._em_say("Started." if not cli else "Started without the launcher.")
         except rc.RecompError as exc:
             self._em_say(str(exc))
 
@@ -1446,9 +1621,14 @@ class EmulatorMixin(CoresMixin, LdnMixin):
 
     # ---- events from the worker threads -----------------------------------------------------------------------
     def _em_on_parent_page(self, rid: str) -> bool:
-        """Is this a fork of the emulator whose page is open?"""
+        """Is this a fork, or an optional extra, of the entry whose page is open?"""
         e = self._em_by_id.get(rid)
-        return bool(e and e.parent and e.parent == self._em_current and self.em_views.currentIndex() == 1)
+        if not (e and self.em_views.currentIndex() == 1):
+            return False
+        if e.parent:
+            return e.parent == self._em_current
+        current = self._em_by_id.get(self._em_current)
+        return bool(current and any(x.id == rid for x in current.extras))
 
     def _em_event(self, ev: tuple) -> None:
         name = ev[0]
@@ -1495,6 +1675,9 @@ class EmulatorMixin(CoresMixin, LdnMixin):
                 self.emd_msg.setText(error or f"Installed {inst.version}. Press Launch to start it.")
             elif error and self.em_views.currentIndex() == 1:
                 self.emd_msg.setText(f"{self._em_by_id[rid].name}: {error}" if rid in self._em_by_id else error)
+            elif not error and rid in self._em_by_id and self._em_on_parent_page(rid):
+                self.emd_msg.setText(f"Installed {self._em_by_id[rid].name} {inst.version}.".strip())
+                self._em_extras_sig = None  # its row says what it is now
             self._em_refresh_views()
             self._em_refresh_status()
         elif name == "emu_logo":

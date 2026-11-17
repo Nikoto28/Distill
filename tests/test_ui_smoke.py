@@ -533,6 +533,59 @@ class WindowSmokeTests(WindowTestCase, IsolatedSoundtrackFiles):
                 self.assertEqual(list(win.em_cards), ids)
                 self.assertTrue(all(isinstance(c, EmulatorTile) for c in win.em_cards.values()))
 
+    def test_the_anyps5_page_explains_a_tool_and_offers_no_emulator_install(self):
+        import tempfile
+        from pathlib import Path
+
+        from distill import recomps as rc
+
+        td = tempfile.TemporaryDirectory(prefix="distill_anyps5_ui_")
+        self.addCleanup(td.cleanup)
+        with mock.patch.object(rc, "ROOT", Path(td.name)), \
+                mock.patch.object(rc, "cache_root", return_value=Path(td.name)):
+            win = self.make_window()
+            self.addCleanup(win.close)
+            with mock.patch("threading.Thread.start", lambda self: None):
+                win._nav_click("emus")
+                win._em_show_detail("anyps5")
+                self.assertEqual(win.emd_title.text(), "AnyPS5")
+                self.assertFalse(win.emd_tool_card.isHidden())  # what it does, how it is set up, what it needs
+                body = win.emd_tool_body.toPlainText()
+                self.assertIn("relinker", body)
+                self.assertIn("Setup on Linux", body)
+                self.assertIn("Setup on Windows", body)
+                self.assertIn("AVX2", body)  # what the PC has to have
+                self.assertIn("--windows", body)  # and how it is run
+                self.assertFalse(win.emd_open_tools.isHidden())
+                self.assertTrue(win.emd_main.isHidden())  # no install button: it is a tool, not an emulator
+                self.assertTrue(win.emd_launch.isHidden())
+                self.assertTrue(win.emd_notes_card.isHidden())  # there are no release notes for an emulator that isn't one
+                self.assertIn("not an emulator", win.emd_status.text().lower())
+
+    def test_the_shadps4_page_offers_its_qt_launcher_as_an_optional_extra(self):
+        import tempfile
+        from pathlib import Path
+
+        from distill import recomps as rc
+
+        td = tempfile.TemporaryDirectory(prefix="distill_shadps4_ui_")
+        self.addCleanup(td.cleanup)
+        with mock.patch.object(rc, "ROOT", Path(td.name)), \
+                mock.patch.object(rc, "cache_root", return_value=Path(td.name)):
+            win = self.make_window()
+            self.addCleanup(win.close)
+            with mock.patch("threading.Thread.start", lambda self: None):
+                win._nav_click("emus")
+                self.assertNotIn("shadps4-qtlauncher", win.em_cards)  # it is an extra, never a tile of its own
+                win._em_show_detail("shadps4")
+                self.assertFalse(win.emd_extras_card.isHidden())
+                self.assertEqual(win.emd_extras_lay.count(), 1)
+                row = win.emd_extras_lay.itemAt(0).widget()
+                texts = [w.text() for w in row.findChildren(type(win.emd_open_tools)) if hasattr(w, "text")]
+                self.assertTrue(any("Install" in t for t in texts), texts)
+                labels = [w.text() for w in row.findChildren(type(win.emd_status))]
+                self.assertTrue(any("PRE-RELEASE" in t for t in labels), labels)  # it is labelled, not passed off as stable
+
     def test_an_emulator_tile_shows_status_and_the_buttons_that_apply(self):
         from PySide6.QtGui import QColor
 

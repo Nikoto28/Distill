@@ -99,12 +99,9 @@ class Emulator:
     extras: tuple["Emulator", ...] = ()  # catalog: optional extras of this entry (shadPS4's Qt launcher), never tiles of their own
 
 
-
-
 LEGACY_STATUSES = ("superseded", "discontinued")  # nothing to download any more; a copy the person already has still runs
 STATUSES = LEGACY_STATUSES + ("experimental",)
 KINDS = ("emulator", "tool")  # "tool": listed so its page can explain it, but there is no emulator to install or launch
-
 
 
 def _tuple(v) -> tuple:
@@ -242,8 +239,6 @@ def installed_companion(em: Emulator, store: rc.Store) -> rc.Installed | None:
         if inst is not None and inst.exe_path().exists():
             return inst
     return None
-
-
 
 
 def for_this_os(em: Emulator, plat: str = "") -> bool:
