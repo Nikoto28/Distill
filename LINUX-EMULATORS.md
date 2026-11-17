@@ -180,12 +180,34 @@ already has still launches**, and the page's main button becomes "Open Azahar" w
 - **Verified by test:** nothing installs, `latest_for` explains it, and a linked `sudachi.AppImage` still launches.
 - **Not verified:** there is nothing left to verify.
 
+### The PlayStation entries and the rest of the catalog
+
+The same policy and the same entry shape carry three further cases, and the auditor's corrections to the other 30
+entries:
+
+- **AnyPS5** is not an emulator but a porting toolchain. Its entry is `"kind": "tool"`: nothing is installed or started
+  from its page, which instead explains the relinker, its per-system setup, its dependencies and its command lines, and
+  points at Settings > Tools where Distill already installs it.
+- **KytyPS5** launches `kyty_launcher` (the graphical launcher), which is what the published archive actually contains —
+  not `kyty_emulator`, and not a `kytyps5` file that does not exist.
+- **shadPS4** takes a nested `"extras": [...]` entry for its optional Qt launcher: an extra installs into its own folder,
+  is found by a scan, and is preferred as the launch target when installed, while the emulator's own command-line
+  program stays one call away. The extra is marked `prerelease_only`, because GitHub calls no release "latest" in a
+  repository whose releases are all pre-releases (`/releases/latest` answers 404) — `recomps.latest_release()` answers
+  that from the release list instead of reporting "no releases".
+
+`CATALOG-CHANGES.md` (repository root) is the per-entry record: what changed, the URL and date behind each change, the
+three places the audit itself was wrong (MAME has no Linux binary — `mame0289lx.zip` is XML; Ymir's program is
+`ymir-sdl3`; BigPEmu's is `bigpemu`), and what could not be verified.
+
 ## 3. Tests
 
 - Before this change: **1867 tests, OK (skipped=1)** — command:
   `QT_QPA_PLATFORM=offscreen ../.venv-1.5.0/bin/python tests/ci_unittest.py --timeout 900 -- ../.venv-1.5.0/bin/python -m unittest discover -s tests -t .`
 - After: **1920 tests, OK (skipped=1)** with the same command — 53 added (51 in `tests/test_install_policy.py`, 2 in
   `tests/test_ui_smoke.py`).
+- After the PlayStation and catalog-correction card: **1956 tests, OK (skipped=1)** with the same command — 36 more (34
+  in `tests/test_playstation_and_audit.py`, 2 in `tests/test_ui_smoke.py`). See `CATALOG-CHANGES.md`.
 
 New coverage lives in `tests/test_install_policy.py` (the order, architecture, AppImage-in-archive installs, the FUSE
 fallback, the six entries against the recorded API answers, the Lichii/Eglantine regression) and in `tests/test_ui_smoke.py`
