@@ -59,7 +59,13 @@ class ManifestTests(Isolated):
         self.assertEqual(len({e.id for e in cat}), len(cat))
         for e in cat:
             self.assertTrue(e.name and e.system, e.id)
-            self.assertTrue(e.repo or e.adapter, e.id)
+            # Every entry points somewhere its builds come from, except one that has been superseded or discontinued: those
+            # point at nothing on purpose, so nothing can be downloaded under their name (their repository may redirect to
+            # the project that took over, which is the one thing that must never happen).
+            self.assertTrue(e.repo or e.adapter or e.status in em.LEGACY_STATUSES, e.id)
+            if e.status in em.LEGACY_STATUSES:
+                self.assertFalse(e.repo, f"{e.id}: a {e.status} entry must not name a repository")
+                self.assertTrue(len(e.notes) > 80, f"{e.id}: say what happened")
             if e.repo and e.source == "github":
                 self.assertRegex(e.repo, r"^[\w.-]+/[\w.-]+$", e.id)
             self.assertIn(e.version_from, ("tag", "published_at", "asset"))

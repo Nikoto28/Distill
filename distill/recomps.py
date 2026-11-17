@@ -1705,17 +1705,25 @@ def _is_console_exe(exe: Path) -> bool:
     return len(pe) >= 24 + 70 and pe[:4] == b"PE\0\0" and int.from_bytes(pe[24 + 68:24 + 70], "little") == 3
 
 
-def launch(inst: Installed, detach: bool = True) -> subprocess.Popen:
+def launch(inst: Installed, detach: bool = True, env: dict | None = None) -> subprocess.Popen:
     """Start an installed project. With `detach` off it stays in the caller's process tree (and on a Mac `open` waits for it to quit), which is
-    what `distill --launch` needs so that whatever started it, Sunshine for one, can tell when the game ends."""
+    what `distill --launch` needs so that whatever started it, Sunshine for one, can tell when the game ends.
+
+    `env` is for a program that needs one extra variable of its own (an AppImage on a host without FUSE2); it is merged onto this
+    process's environment. When it is None the child simply inherits, which is what every ordinary launch does. Either way the
+    environment goes through `hostenv.host_env` like any other child, so a frozen bundle still can't leak its own libraries into it.
+    """
     exe = inst.exe_path()
     if not exe.exists():
         raise RecompError("The game's files are missing. Install it again.")
     flags = 0
-    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    quiet: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if env is not None:
+        quiet["env"] = dict(env)
     if sys.platform == "win32":
         if _is_console_exe(exe):
-            flags, quiet = subprocess.CREATE_NEW_CONSOLE, {}  # as when double-clicked: its own console, its own streams
+            flags = subprocess.CREATE_NEW_CONSOLE
+            quiet = {}  # as when double-clicked: its own console, its own streams
         elif detach:
             flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         cmd = [str(exe)]
@@ -1723,6 +1731,8 @@ def launch(inst: Installed, detach: bool = True) -> subprocess.Popen:
         cmd = ["open", str(exe)] if detach else ["open", "-W", str(exe)]
     else:
         cmd = [str(exe)]
+    if env is not None:  # after the stream choices above, so a console program's streams can't drop it
+        quiet["env"] = dict(env)
     try:
         return subprocess.Popen(cmd, cwd=str(exe.parent), creationflags=flags, close_fds=True,
                                 start_new_session=(detach and sys.platform != "win32"), **quiet)

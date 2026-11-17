@@ -210,8 +210,8 @@
    "repo": "projects/Ryubing",
    "host": "git.ryujinx.app",
    "website": "https://ryujinx.app/",
-   "verify": true,
-   "notes": "Ryubing, the maintained Ryujinx. Its site moved from GitLab to Forgejo. An open-source Nintendo Switch emulator focused on accuracy, performance, and a user-friendly interface.",
+   "verify": false,
+   "notes": "Ryubing, the maintained Ryujinx. Its site moved from GitLab to Forgejo, and it is the project you get today: the original Ryujinx/Ryujinx repository is gone (404). An open-source Nintendo Switch emulator focused on accuracy, performance, and a user-friendly interface.",
    "systems": [
     "Switch"
    ],
@@ -227,7 +227,14 @@
    "channel_repos": {
     "nightly": "Ryubing/Canary"
    },
-   "portable": "portable/"
+   "portable": "portable/",
+   "linux": {
+    "download_hosts": [
+     "git.ryujinx.app"
+    ],
+    "exe": "(^|/)ryujinx[^/]*\\.AppImage$|(^|/)Ryujinx(\\.exe)?$",
+    "notes": "Ryubing is the maintained Ryujinx (the original Ryujinx/Ryujinx repository no longer exists). On Linux, Distill installs the official AppImage for this PC's CPU - ryujinx-<version>-x64.AppImage or -arm64.AppImage - from git.ryujinx.app, the project's Forgejo host, and the linux_x64 / linux_arm64 .tar.gz builds are offered as alternatives. Its releases publish no checksum file, so a download is checked by size only; that is a property of the project, not a Distill setting."
+   }
   },
   {
    "id": "eden",
@@ -270,10 +277,8 @@
    "name": "Sudachi",
    "system": "Switch",
    "group": "Nintendo",
-   "repo": "emuplace/sudachi.emuplace.app",
-   "website": "https://sudachi.emuplace.app/",
-   "verify": true,
-   "notes": "An experimental Nintendo Switch emulator fork based on the Yuzu architecture.",
+   "status": "discontinued",
+   "notes": "Sudachi is discontinued. Its official repository (sudachi-emu/sudachi) no longer exists and its old site no longer answers with a valid certificate, so there is no official build to download from anywhere. Distill will not point at a fork, a mirror or a re-upload of it, and will not download anything under its name. A Sudachi you already have keeps launching.",
    "systems": [
     "Switch"
    ],
@@ -281,23 +286,30 @@
     "sudachi"
    ],
    "portable": "user/",
-   "trusted_owner": "emuplace"
+   "exe": "(^|/)sudachi[^/]*\\.AppImage$|(^|/)sudachi(\\.exe)?$"
   },
   {
    "id": "eglantine",
    "name": "Eglantine",
    "system": "Switch 2",
    "group": "Nintendo",
-   "repo": "Djihads80/Eglantine",
-   "website": "https://github.com/Djihads80/Eglantine",
-   "verify": true,
-   "notes": "An experimental emulator project combining codebases from Eden, Yuzu, and Sudachi architectures.",
+   "repo": "Eglantine-Community/Eglantine",
+   "trusted_owner": "Eglantine-Community",
+   "website": "https://github.com/Eglantine-Community/Eglantine",
+   "verify": false,
+   "status": "experimental",
+   "notes": "An experimental emulator project combining codebases from Eden, Yuzu, and Sudachi architectures. The project describes itself as a VERY experimental Nintendo Switch 2 emulator: its newest tag is a release candidate even though GitHub's prerelease flag is off, so Distill labels it experimental rather than stable.",
    "systems": [
     "Switch 2"
    ],
    "aliases": [
     "eglantine"
-   ]
+   ],
+   "linux": {
+    "trusted_owner": "Eglantine-Community",
+    "exe": "(^|/)eglantine[^/]*\\.AppImage$|(^|/)eglantine(\\.exe)?$",
+    "notes": "Eglantine is a VERY experimental Nintendo Switch 2 emulator, built on code from Eden, yuzu and Sudachi. Its releases are release candidates and daily builds, not stable versions, so expect crashes. On Linux, Distill installs the official eglantine AppImage for this PC's CPU (x86_64 or aarch64), and the PGO build or the .tar.gz are offered as alternatives. Eglantine and Lichii are separate projects that publish separate binaries: eglantine-* files are Eglantine's, lichii-* files are Lichii's."
+   }
   },
   {
    "id": "lichii",
@@ -307,9 +319,10 @@
    "repo": "zortos293/Lichii",
    "trusted_owner": "zortos293",
    "website": "https://github.com/zortos293/Lichii",
-   "verify": true,
    "logo": "https://github.com/zortos293/Lichii/raw/nx2/dist/branding/lichii_icon_with_logo.png",
-   "notes": "A very experimental Nintendo Switch 2 emulator (it also runs Switch titles), forked from Eglantine, Eden, yuzu and Sudachi. Early builds are Windows-only pre-releases, so expect crashes and rendering errors.",
+   "verify": false,
+   "status": "experimental",
+   "notes": "A very experimental Nintendo Switch 2 emulator that also runs Switch titles, forked from the Eglantine, Eden, yuzu and Sudachi codebases. It is a separate project from Eglantine, with its own repository and its own lichii-* builds. Early builds were Windows-only pre-releases; Linux AppImages are published now, and both remain experimental, so expect crashes and rendering errors.",
    "systems": [
     "Switch 2"
    ],
@@ -317,7 +330,12 @@
     "lichii",
     "eglantine-nx2"
    ],
-   "exe": "(^|/)(lichii|eglantine)(\\.exe)?$"
+   "exe": "(^|/)lichii(\\.exe)?$",
+   "linux": {
+    "trusted_owner": "zortos293",
+    "exe": "(^|/)lichii[^/]*\\.AppImage$|(^|/)lichii(\\.exe)?$",
+    "notes": "A VERY experimental Nintendo Switch 2 emulator (it also runs Switch titles), forked from the Eglantine, Eden, yuzu and Sudachi codebases. On Linux, Distill installs the official lichii AppImage for this PC's CPU (x86_64 or aarch64), and the PGO build or the .tar.gz are offered as alternatives. Lichii and Eglantine are separate projects with separate binaries: lichii-* files are Lichii's, eglantine-* files are Eglantine's, and Distill never takes one for the other."
+   }
   },
   {
    "id": "azahar",
@@ -325,8 +343,9 @@
    "system": "Nintendo 3DS",
    "group": "Nintendo",
    "repo": "azahar-emu/azahar",
+   "trusted_owner": "azahar-emu",
    "website": "https://azahar-emu.org/",
-   "verify": true,
+   "verify": false,
    "notes": "A Nintendo 3DS emulator that acts as a direct continuation and successor to Lime3DS and Citra architectures.",
    "systems": [
     "Nintendo 3DS"
@@ -334,7 +353,15 @@
    "aliases": [
     "azahar"
    ],
-   "portable": "user/"
+   "portable": "user/",
+   "linux": {
+    "trusted_owner": "azahar-emu",
+    "asset": {
+     "linux-x64": "^azahar\\.AppImage$"
+    },
+    "exe": "(^|/)azahar[^/]*\\.AppImage$|(^|/)azahar(\\.exe)?$",
+    "notes": "A Nintendo 3DS emulator that acts as a direct continuation and successor to Lime3DS and Citra architectures. On Linux, Distill installs the official azahar.AppImage and keeps it up to date from the project's releases. The project publishes that AppImage for x86_64 only, so there is no Linux build for aarch64 machines. Its release candidates and alphas are marked as pre-releases, and Distill only falls back to them when the stable line has nothing newer."
+   }
   },
   {
    "id": "melonds",
@@ -609,15 +636,17 @@
    "name": "Lime3DS",
    "system": "Nintendo 3DS",
    "group": "Nintendo",
-   "repo": "Lime3DS/Lime3DS",
    "website": "https://lime3ds.github.io/",
-   "notes": "A Nintendo 3DS emulator based on Citra.",
+   "status": "superseded",
+   "replaced_by": "azahar",
+   "notes": "Lime3DS is superseded: its repository (Lime3DS/Lime3DS) now redirects to Azahar, no Lime3DS build is published anywhere official, and Azahar is the maintained 3DS emulator that took over from Citra and Lime3DS. Distill will never download Azahar (or anything else) under the Lime3DS name. A Lime3DS you already have keeps launching; install Azahar for new 3DS setups.",
    "systems": [
     "Nintendo 3DS"
    ],
    "aliases": [
     "lime3ds"
-   ]
+   ],
+   "exe": "(^|/)lime3ds[^/]*\\.AppImage$|(^|/)lime3ds(\\.exe)?$"
   },
   {
    "id": "fbneo",
