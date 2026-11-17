@@ -610,7 +610,8 @@
     },
     "exe": "(^|/)Mesen$|(^|/)Mesen(\\.exe)?$",
     "notes": "A multi-system emulator for NES, SNES, Game Boy, PC Engine and more. On Linux it publishes Mesen_<version>_Linux_x64.zip (and an ARM64 one) holding a single `Mesen` program - there is no AppImage and none is promised. The old SourMesen/Mesen2 repository is archived; Distill follows Mesen CE."
-   }
+   },
+   "exe": "(^|/)Mesen(\\.exe)?$"
   },
   {
    "id": "xenia-canary",

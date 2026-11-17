@@ -389,6 +389,10 @@ class CatalogCorrectionTests(Linux):
         self.assertEqual(e.name, "Mesen CE")
         self.assertIsNotNone(re.search(e.asset["linux"], "Mesen_2.2.1_Linux_x64.zip"))
         self.assertEqual([m for m in ("mesen2", "mesen") if m in e.aliases], ["mesen2", "mesen"])
+        # Mesen_2.2.1_Windows.zip holds Mesen.exe; Mesen_2.2.1_Linux_x64.zip holds Mesen
+        win = self.catalog("windows")["mesen2"]
+        self.assertIsNotNone(re.search(win.exe, "Mesen.exe", re.IGNORECASE))
+        self.assertIsNotNone(re.search(e.exe, "Mesen", re.IGNORECASE))
 
     def test_ymirs_launch_target_is_the_program_its_tarball_holds(self):
         e = self.cat["ymir"]
