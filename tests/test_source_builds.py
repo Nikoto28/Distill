@@ -209,5 +209,47 @@ else:
         self.assertLess(atomic, deps)  # the check comes before any package is installed
 
 
+class ToolBuildTests(TempDirTest):
+    """Tools that are no longer downloadable (hactoolnet) are compiled instead: same recipe machinery, but the
+    result is filed where the tool manager expects its downloads."""
+
+    def test_only_tools_with_a_recipe_offer_to_build(self):
+        from distill import tools
+        self.assertEqual(tools.build_recipe("hactoolnet"), "hactoolnet")
+        self.assertEqual(tools.build_recipe("chdman"), "")   # a distribution package or a hand-picked file
+        self.assertEqual(tools.build_recipe("nonsense"), "")
+
+    @POSIX_ONLY
+    def test_the_hactoolnet_script_is_valid_bash_and_files_itself_correctly(self):
+        root = self.tmp / "tools" / "hactoolnet"
+        script = builds.write_tool_script("hactoolnet", root)
+        self.assertTrue(script.stat().st_mode & 0o111)
+        check = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        text = script.read_text()
+        for expected in ("git.ryujinx.app/projects/LibHac", "master", "--self-contained true",
+                         "dotnet-install.sh", "current.txt", "hactoolnet"):
+            self.assertIn(expected, text)
+        self.assertIn("exit 0", text)  # a closed stdin must not look like a failure
+        # The v0.19.0 tag does not compile; the recipe must not be pinned to it.
+        self.assertNotIn("v0.19.0", text)
+
+    def test_a_built_tool_is_picked_up_like_a_downloaded_one(self):
+        from distill import tools
+        root = self.tmp / "tools" / "hactoolnet"
+        (root / "0.21.0").mkdir(parents=True)
+        exe = root / "0.21.0" / tools.HactoolnetManager.EXE_NAME
+        exe.write_bytes(b"#!/bin/sh\necho 'hactoolnet 0.21.0'\n")
+        exe.chmod(0o755)
+        (root / "current.txt").write_text("0.21.0")
+        manager = tools.HactoolnetManager(lambda _ev: None)
+        manager.root = root
+        found = manager.cached()
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual(found[0], "0.21.0")
+        self.assertEqual(found[1], exe)
+
+
 if __name__ == "__main__":
     unittest.main()

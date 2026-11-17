@@ -55,6 +55,11 @@ The unified file uses the existing Windows DPAPI/system-keyring sealing helper a
 - Ares has a **Build from source** button that opens a terminal. Its generated script installs distribution build
   dependencies after the user's password prompt, then builds into the emulator folder. Debian, Fedora and Arch
   families are supported. Atomic Fedora systems receive instructions before any package installation.
+- hactoolnet has a **Build** button in Settings → Tools. Its project (Thealexbarney/LibHac) is no longer on GitHub, so
+  there is nothing to download on any system; the button compiles the maintained fork
+  (`git.ryujinx.app/projects/LibHac`) from `master` (the `v0.19.0` tag no longer compiles). It needs no packages and no
+  password: a private .NET SDK is installed into the tool's own folder, so this works on an atomic system too, and the
+  build is filed where the tool manager expects a download.
 
 `chdman`, DolphinTool, maxcso and ZArchive need distribution packages or source builds when no native release is
 available. On Arch, install chdman from `mame-tools`. Windows catalog sources, asset selection and trust settings
