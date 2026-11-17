@@ -150,6 +150,7 @@ class AnyPS5Tests(Linux):
     def test_its_page_explains_what_it_does_instead_of_showing_a_dead_install_button(self):
         self.assertIn("not an emulator", self.e.notes)
         self.assertIn("Settings > Tools", self.e.notes)
+        self.assertIn("source/eboot.bin", self.e.notes)
         # the long form: what it is, what it is not, how Linux and Windows each get set up, what is needed, how it runs
         self.assertIn("relinker", self.e.details.lower())
         self.assertIn("differs from an emulator", self.e.details)
